@@ -1,0 +1,14 @@
+Import('*')
+
+SimObject('SystolicArrayCore.py', sim_objects=['SystolicArrayCore'])
+Source('process_element.cc')
+Source('systolic_tile.cc')
+Source('systolic_matrix.cc')
+Source('systolic_array_core.cc')
+DebugFlag('ProcessElement')
+DebugFlag('OutputBuffer')
+DebugFlag('SystolicTile')
+DebugFlag('SystolicMatrix')
+DebugFlag('SystolicArrayCore')
+
+# 如果需要，添加特定的编译标志(?)

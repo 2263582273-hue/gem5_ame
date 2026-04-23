@@ -1,0 +1,119 @@
+// Matrix Extension
+
+let {{
+def setMlenb():
+    return "[[maybe_unused]] uint32_t mlenb = mlen >> 3;\n"
+def setMrlenb():
+    return "[[maybe_unused]] uint32_t mrlenb = mrlen >> 3;\n"
+
+def declareMMemTemplate(class_name):
+    return f'''
+    template class {class_name}<uint8_t>;
+    template class {class_name}<uint16_t>;
+    template class {class_name}<uint32_t>;
+    template class {class_name}<uint64_t>;
+    '''
+
+def getFaultCode():
+    return '''
+    Addr fault_addr;
+    if (fault != NoFault && getFaultVAddr(fault, fault_addr)) {
+        assert(fault_addr >= EA);
+        faultIdx = (fault_addr - EA) / (width_EEW(machInst.width) / 8);
+        if (microIdx != 0 || faultIdx != 0) {
+            fault = NoFault;
+            trimVl = true;
+        }
+    }
+    '''
+
+def MMemBase(name, Name, ea_code, memacc_code, mem_flags,
+             inst_flags, base_class, postacc_code='',
+             declare_template_base=MMemTemplateMacroDeclare,
+             decode_template=MMemTemplateDecodeBlock,
+             exec_template_base='',
+             is_macroop=True):
+
+    mem_flags = makeList(mem_flags)
+    inst_flags = makeList(inst_flags)
+
+    iop = InstObjParams(name, Name, base_class,
+        {'ea_code': ea_code,
+         'memacc_code': memacc_code,
+         'postacc_code': postacc_code,
+         'declare_mmem_template': declareMMemTemplate(Name)},
+        inst_flags)
+
+    constructTemplate = eval(exec_template_base + 'Constructor')
+
+    header_output = declare_template_base.subst(iop)
+    decoder_output = constructTemplate.subst(iop)
+    decode_block = decode_template.subst(iop)
+    exec_output = ''
+
+    if not is_macroop:
+        return (header_output, decoder_output, decode_block, exec_output)
+
+    micro_class_name = exec_template_base + 'MicroInst'
+
+    fault_only_first = 'FaultOnlyFirst' in iop.op_class
+
+    microiop = InstObjParams(name + '_micro',
+        Name + 'Micro',
+        exec_template_base + 'MicroInst',
+        {'ea_code': ea_code,
+         'memacc_code': memacc_code,
+         'postacc_code': postacc_code,
+         'set_mlenb': setMlenb(),
+         'set_mrlenb': setMrlenb(),
+         'declare_mmem_template': declareMMemTemplate(Name + 'Micro'),
+         'fault_code': getFaultCode() if fault_only_first else ''},
+        inst_flags)
+
+    if mem_flags:
+        mem_flags = ['Request::%s' % flag for flag in mem_flags]
+        s = '\n\tmemAccessFlags = ' + '|'.join(mem_flags) + ';'
+        microiop.constructor += s
+
+    microDeclTemplate = eval(exec_template_base + 'Micro' + 'Declare')
+    microConsTemplate = eval(exec_template_base + 'Micro' + 'Constructor')
+    microExecTemplate = eval(exec_template_base + 'Micro' + 'Execute')
+    microInitTemplate = eval(exec_template_base + 'Micro' + 'InitiateAcc')
+    microCompTemplate = eval(exec_template_base + 'Micro' + 'CompleteAcc')
+
+    header_output = microDeclTemplate.subst(microiop) + header_output
+    decoder_output = microConsTemplate.subst(microiop) + decoder_output
+    micro_exec_output = (microExecTemplate.subst(microiop) +
+        microInitTemplate.subst(microiop) +
+        microCompTemplate.subst(microiop))
+    exec_output += micro_exec_output
+
+    return (header_output, decoder_output, decode_block, exec_output)
+
+}};
+
+def format MleOp(
+    memacc_code,
+    ea_code={{
+        EA = Rs1 + Rs2 * microIdx;
+    }},
+    mem_flags=[],
+    inst_flags=[]
+) {{
+    (header_output, decoder_output, decode_block, exec_output) = \
+        MMemBase(name, Name, ea_code, memacc_code, mem_flags, inst_flags,
+                'MleMacroInst', exec_template_base='Mle')
+}};
+
+def format MseOp(
+    memacc_code,
+    ea_code={{
+        EA = Rs1 + Rs2 * microIdx;
+    }},
+    mem_flags=[],
+    inst_flags=[]
+) {{
+    (header_output, decoder_output, decode_block, exec_output) = \
+        MMemBase(name, Name, ea_code, memacc_code, mem_flags, inst_flags,
+                 'MseMacroInst', exec_template_base='Mse')
+}};

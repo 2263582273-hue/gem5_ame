@@ -1,0 +1,767 @@
+// Matrix Extension
+def format MConfOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MConfOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MConfConstructor.subst(iop)
+    decode_block = MConfDecodeBlock.subst(iop)
+    exec_output = MConfExecute.subst(iop)
+    if name != 'msettype':
+        branchTargetTemplate = eval(branch_class)
+        exec_output += branchTargetTemplate.subst(iop)
+}};
+
+def template MConfConstructor {{
+    %(class_name)s::%(class_name)s(ExtMachInst _machInst)
+        : %(base_class)s("%(mnemonic)s", _machInst,%(op_class)s)
+        {
+            %(set_reg_idx_arr)s;
+            %(constructor)s;
+        }
+}};
+
+def template MConfDecodeBlock {{
+    return new %(class_name)s(machInst);
+}};
+
+def template MConfExecute {{
+    MTYPE
+    %(class_name)s::getNewMtype(
+        MTYPE oldMtype, MTYPE reqMtype)  const
+        {
+               MTYPE newMtype = oldMtype;
+        if (oldMtype != reqMtype) {
+            newMtype = reqMtype;
+        }
+        // TODO: For each type field,
+        // a value 0 means the corresponding type is disabled.
+        // Write non-zero value to enable
+        // matrix multiplication operation of the specified type.
+        // 0 will be returned and
+        //  mill will be set if the type is not supported.
+        newMtype.mill=0;
+        return newMtype;
+    }
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+        MISA misa = xc->readMiscReg(MISCREG_ISA);
+        STATUS status = xc->readMiscReg(MISCREG_STATUS);
+        if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+            return std::make_shared<IllegalInstFault>(
+                "RVMatrix disabled or MPU is off", machInst);
+        }
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        new_mtype = getNewMtype(Mtype, new_mtype);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+ }};
+
+ def template MSetTypeDeclare {{
+    //
+    // Static instruction class for "%(mnemonic)s".
+    //
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        MTYPE getNewMtype(MTYPE, MTYPE) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTypeImmDeclare {{
+    //
+    // Static instruction class for "%(mnemonic)s".
+    //
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        MTYPE getNewMtype(MTYPE, MTYPE) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        std::unique_ptr<PCStateBase> branchTarget(
+            const PCStateBase &branch_pc) const override;
+
+        using StaticInst::branchTarget;
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTypeImmBranchTarget {{
+    std::unique_ptr<PCStateBase>
+    %(class_name)s::branchTarget(const PCStateBase &branch_pc) const
+    {
+        auto &rpc = branch_pc.as<RiscvISA::PCState>();
+        uint64_t Mtype = rpc.mtype();
+        %(code)s;
+        new_mtype = getNewMtype(Mtype, new_mtype);
+
+        std::unique_ptr<PCState> npc(dynamic_cast<PCState*>(rpc.clone()));
+        npc->set(rvSext(npc->pc() + 4));
+        npc->new_mconf(true);
+        npc->mtype(new_mtype);
+        return npc;
+    }
+}};
+
+def format MSetTilemOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MSetTilemOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MSetTilemConstructor.subst(iop)
+    decode_block = MSetTilemDecodeBlock.subst(iop)
+    exec_output = MSetTilemExecute.subst(iop)
+}};
+
+def template MSetTilemDeclare {{
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        uint32_t getNewMtilem(
+            uint32_t, uint32_t, uint32_t, uint64_t, uint64_t) const;
+
+      public:
+        %(class_name)s(ExtMachInst machInst, uint32_t mlen, uint32_t mrlen);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+
+        using %(base_class)s::generateDisassembly;
+    };
+}};
+
+def template MSetTilemConstructor {{
+%(class_name)s::%(class_name)s(ExtMachInst _machInst, uint32_t _mlen, uint32_t _mrlen)
+    : %(base_class)s("%(mnemonic)s", _machInst, _mlen, _mrlen, %(op_class)s)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+    }
+}};
+
+def template MSetTilemDecodeBlock {{
+    return new %(class_name)s(machInst, mlen, mrlen);
+}};
+
+def template MSetTilemExecute {{
+    uint32_t
+    %(class_name)s::getNewMtilem(
+        uint32_t currentMtilem, uint32_t reqMtilem,
+        uint32_t mtilemmax, uint64_t rdBits, uint64_t rs1Bits) const
+    {
+        uint32_t newMtilem = 0;
+        if (mtilemmax == 0) {
+            newMtilem = 0;
+        } else if (rdBits == 0 && rs1Bits == 0) {
+            newMtilem = (currentMtilem > mtilemmax) ? mtilemmax : currentMtilem;
+        } else if (rdBits != 0 && rs1Bits == 0) {
+            newMtilem = mtilemmax;
+        } else if (rs1Bits != 0) {
+            newMtilem = (reqMtilem > mtilemmax) ? mtilemmax : reqMtilem;
+        }
+        return newMtilem;
+    }
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        mtilemmax =  getMtilemMax(mlen, mrlen);
+        uint32_t new_mtilem = getNewMtilem(
+            current_mtilem, requested_mtilem, mtilemmax, rd_bits, rs1_bits);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+}};
+
+def format MSetTilemiOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MSetTilemiOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+    branchTargetTemplate = eval(branch_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MSetTilemiConstructor.subst(iop)
+    decode_block = MSetTilemiDecodeBlock.subst(iop)
+    exec_output = MSetTilemiExecute.subst(iop) + branchTargetTemplate.subst(iop)
+}};
+
+def template MSetTilemiDeclare {{
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        uint32_t getNewMtilem(
+            uint32_t, uint32_t, uint32_t, uint64_t, uint64_t) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst, uint32_t mlen, uint32_t mrlen);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        std::unique_ptr<PCStateBase> branchTarget(
+                const PCStateBase &branch_pc) const override;
+
+        using StaticInst::branchTarget;
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTilemiConstructor {{
+%(class_name)s::%(class_name)s(ExtMachInst _machInst, uint32_t _mlen, uint32_t _mrlen)
+    : %(base_class)s("%(mnemonic)s", _machInst, _mlen, _mrlen, %(op_class)s)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+    }
+}};
+
+def template MSetTilemiDecodeBlock {{
+    return new %(class_name)s(machInst, mlen, mrlen);
+}};
+
+def template MSetTilemiExecute {{
+    uint32_t
+    %(class_name)s::getNewMtilem(
+        uint32_t currentMtilem, uint32_t reqMtilem,
+        uint32_t mtilemmax, uint64_t rdBits, uint64_t rs1Bits) const
+    {
+        uint32_t newMtilem = 0;
+        if (mtilemmax == 0) {
+            newMtilem = 0;
+        } else if (rdBits == 0 && rs1Bits == 0) {
+            newMtilem = (currentMtilem > mtilemmax) ? mtilemmax : currentMtilem;
+        } else if (rdBits != 0 && rs1Bits == 0) {
+            newMtilem = mtilemmax;
+        } else if (rs1Bits != 0) {
+            newMtilem = (reqMtilem > mtilemmax) ? mtilemmax : reqMtilem;
+        }
+        return newMtilem;
+    }
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        mtilemmax =  getMtilemMax(mlen, mrlen);
+        uint32_t new_mtilem = getNewMtilem(
+            current_mtilem, requested_mtilem, mtilemmax, rd_bits, rs1_bits);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+}};
+
+def template MSetTilemiBranchTarget {{
+    std::unique_ptr<PCStateBase>
+    %(class_name)s::branchTarget(const PCStateBase &branch_pc) const
+    {
+        auto &rpc = branch_pc.as<RiscvISA::PCState>();
+
+        uint64_t rd_bits = machInst.rd;
+        uint64_t rs1_bits = -1;
+        uint64_t requested_mtilem = imm10;
+
+
+        uint32_t mtilemmax =  getMtilemMax(mlen, mrlen);
+        uint32_t new_mtilem = getNewMtilem(
+           rpc.mtilem(), requested_mtilem, mtilemmax, rd_bits, rs1_bits);
+
+        std::unique_ptr<PCState> npc(dynamic_cast<PCState*>(rpc.clone()));
+        npc->set(rvSext(npc->pc() + 4));
+        npc->new_mconf(true);
+        npc->mtilem(new_mtilem);
+        return npc;
+    }
+}};
+
+def format MSetTilekOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MSetTilekOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MSetTilekConstructor.subst(iop)
+    decode_block = MSetTilekDecodeBlock.subst(iop)
+    exec_output = MSetTilekExecute.subst(iop)
+}};
+
+def template MSetTilekDeclare {{
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        uint32_t getNewMtilek(
+            uint32_t, uint32_t, uint32_t, uint64_t, uint64_t) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst, uint32_t mlen, uint32_t mrlen);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTilekConstructor {{
+%(class_name)s::%(class_name)s(ExtMachInst _machInst, uint32_t _mlen, uint32_t _mrlen)
+    : %(base_class)s("%(mnemonic)s", _machInst, _mlen, _mrlen, %(op_class)s)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+    }
+}};
+
+def template MSetTilekDecodeBlock {{
+    return new %(class_name)s(machInst, mlen, mrlen);
+}};
+
+def template MSetTilekExecute {{
+    uint32_t
+    %(class_name)s::getNewMtilek(
+        uint32_t currentMtilek, uint32_t reqMtilek,
+        uint32_t mtilekmax, uint64_t rdBits, uint64_t rs1Bits) const
+    {
+        // MTYPE current_mtype;
+
+        uint32_t newMtilek = 0;
+        if (mtilekmax == 0) {
+            newMtilek = 0;
+        } else if (rdBits == 0 && rs1Bits == 0) {
+            newMtilek = (currentMtilek > mtilekmax) ? mtilekmax : currentMtilek;
+        } else if (rdBits != 0 && rs1Bits == 0) {
+            newMtilek = mtilekmax;
+        } else if (rs1Bits != 0) {
+            newMtilek = (reqMtilek > mtilekmax) ? mtilekmax : reqMtilek;
+        }
+        return newMtilek;
+    }
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        mtilekmax =  getMtilekMax(mlen, mrlen, melen);
+        uint32_t new_mtilek = getNewMtilek(
+            current_mtilek, requested_mtilek, mtilekmax, rd_bits, rs1_bits);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+}};
+
+def format MSetTilekiOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MSetTilekiOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+    branchTargetTemplate = eval(branch_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MSetTilekiConstructor.subst(iop)
+    decode_block = MSetTilekiDecodeBlock.subst(iop)
+    exec_output = MSetTilekiExecute.subst(iop) + branchTargetTemplate.subst(iop)
+}};
+
+def template MSetTilekiDeclare {{
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        uint32_t getNewMtilek(
+            uint32_t, uint32_t, uint32_t, uint64_t, uint64_t) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst, uint32_t mlen, uint32_t mrlen);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        std::unique_ptr<PCStateBase> branchTarget(
+                const PCStateBase &branch_pc) const override;
+
+        using StaticInst::branchTarget;
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTilekiConstructor {{
+%(class_name)s::%(class_name)s(ExtMachInst _machInst, uint32_t _mlen, uint32_t _mrlen)
+    : %(base_class)s("%(mnemonic)s", _machInst, _mlen, _mrlen, %(op_class)s)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+    }
+}};
+
+def template MSetTilekiDecodeBlock {{
+    return new %(class_name)s(machInst, mlen, mrlen);
+}};
+
+def template MSetTilekiExecute {{
+
+    uint32_t
+    %(class_name)s::getNewMtilek(
+        uint32_t currentMtilek, uint32_t reqMtilek,
+        uint32_t mtilekmax, uint64_t rdBits, uint64_t rs1Bits) const
+    {
+
+        // MTYPE current_mtype;
+
+        uint32_t newMtilek = 0;
+        if (mtilekmax == 0) {
+            newMtilek = 0;
+        } else if (rdBits == 0 && rs1Bits == 0) {
+            newMtilek = (currentMtilek > mtilekmax) ? mtilekmax : currentMtilek;
+        } else if (rdBits != 0 && rs1Bits == 0) {
+            newMtilek = mtilekmax;
+        } else if (rs1Bits != 0) {
+            newMtilek = (reqMtilek > mtilekmax) ? mtilekmax : reqMtilek;
+        }
+        return newMtilek;
+    }
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        mtilekmax =  getMtilekMax(mlen, mrlen, melen);
+        uint32_t new_mtilek = getNewMtilek(
+            current_mtilek, requested_mtilek, mtilekmax, rd_bits, rs1_bits);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+}};
+
+def template MSetTilekiBranchTarget {{
+    std::unique_ptr<PCStateBase>
+    %(class_name)s::branchTarget(const PCStateBase &branch_pc) const
+    {
+        auto &rpc = branch_pc.as<RiscvISA::PCState>();
+
+        uint64_t rd_bits = machInst.rd;
+        uint64_t rs1_bits = -1;
+        uint64_t requested_mtilek = imm10;
+
+        MTYPE current_mtype = rpc.mtype();
+        uint32_t melen = getMelen(current_mtype.msew, current_mtype.msew);
+        uint32_t mtilekmax =  getMtilekMax(mlen, mrlen, melen);
+        uint32_t new_mtilek = getNewMtilek(
+           rpc.mtilek(), requested_mtilek, mtilekmax, rd_bits, rs1_bits);
+
+        std::unique_ptr<PCState> npc(dynamic_cast<PCState*>(rpc.clone()));
+        npc->set(rvSext(npc->pc() + 4));
+        npc->new_mconf(true);
+        npc->mtilek(new_mtilek);
+        return npc;
+    }
+}};
+
+def format MSetTilenOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MSetTilenOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MSetTilenConstructor.subst(iop)
+    decode_block = MSetTilenDecodeBlock.subst(iop)
+    exec_output = MSetTilenExecute.subst(iop)
+}};
+
+def template MSetTilenDeclare {{
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        uint32_t getNewMtilen(
+            uint32_t, uint32_t, uint32_t, uint64_t, uint64_t) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst, uint32_t mrlen);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTilenConstructor {{
+%(class_name)s::%(class_name)s(ExtMachInst _machInst, uint32_t _mrlen)
+    : %(base_class)s("%(mnemonic)s", _machInst, _mrlen, %(op_class)s)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+    }
+}};
+
+def template MSetTilenDecodeBlock {{
+    return new %(class_name)s(machInst, mrlen);
+}};
+
+def template MSetTilenExecute {{
+    uint32_t
+    %(class_name)s::getNewMtilen(
+        uint32_t currentMtilen, uint32_t reqMtilen,
+        uint32_t mtilenmax, uint64_t rdBits, uint64_t rs1Bits) const
+    {
+        // MTYPE current_mtype;
+
+        uint32_t newMtilen = 0;
+        if (mtilenmax == 0) {
+            newMtilen = 0;
+        } else if (rdBits == 0 && rs1Bits == 0) {
+            newMtilen = (currentMtilen > mtilenmax) ? mtilenmax : currentMtilen;
+        } else if (rdBits != 0 && rs1Bits == 0) {
+            newMtilen = mtilenmax;
+        } else if (rs1Bits != 0) {
+            newMtilen = (reqMtilen > mtilenmax) ? mtilenmax : reqMtilen;
+        }
+        return newMtilen;
+    }
+
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        mtilenmax =  getMtilenMax(mrlen, melen);
+        uint32_t new_mtilen = getNewMtilen(
+            current_mtilen, requested_mtilen, mtilenmax, rd_bits, rs1_bits);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+}};
+
+
+def format MSetTileniOp(code, write_code, declare_class, branch_class, *flags) {{
+    iop = InstObjParams(
+        name,
+        Name,
+        'MSetTileniOp',
+        {
+            'code': code,
+            'write_code': write_code,
+        },
+        flags
+    )
+    declareTemplate = eval(declare_class)
+    branchTargetTemplate = eval(branch_class)
+
+    header_output = declareTemplate.subst(iop)
+    decoder_output = MSetTileniConstructor.subst(iop)
+    decode_block = MSetTileniDecodeBlock.subst(iop)
+    exec_output = MSetTileniExecute.subst(iop) + branchTargetTemplate.subst(iop)
+}};
+
+def template MSetTileniDeclare {{
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+        uint32_t getNewMtilen(
+            uint32_t, uint32_t, uint32_t, uint64_t, uint64_t) const;
+
+      public:
+        /// Constructor.
+        %(class_name)s(ExtMachInst machInst, uint32_t mrlen);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        std::unique_ptr<PCStateBase> branchTarget(
+                const PCStateBase &branch_pc) const override;
+
+        using StaticInst::branchTarget;
+        using %(base_class)s::generateDisassembly;
+
+    };
+}};
+
+def template MSetTileniConstructor {{
+%(class_name)s::%(class_name)s(ExtMachInst _machInst, uint32_t _mrlen)
+    : %(base_class)s("%(mnemonic)s", _machInst, _mrlen, %(op_class)s)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+    }
+}};
+
+def template MSetTileniDecodeBlock {{
+    return new %(class_name)s(machInst, mrlen);
+}};
+
+
+def template MSetTileniExecute {{
+    uint32_t
+    %(class_name)s::getNewMtilen(
+        uint32_t currentMtilen, uint32_t reqMtilen,
+        uint32_t mtilenmax, uint64_t rdBits, uint64_t rs1Bits) const
+    {
+
+        // MTYPE current_mtype;
+
+        uint32_t newMtilen = 0;
+        if (mtilenmax == 0) {
+            newMtilen = 0;
+        } else if (rdBits == 0 && rs1Bits == 0) {
+            newMtilen = (currentMtilen > mtilenmax) ? mtilenmax : currentMtilen;
+        } else if (rdBits != 0 && rs1Bits == 0) {
+            newMtilen = mtilenmax;
+        } else if (rs1Bits != 0) {
+            newMtilen = (reqMtilen > mtilenmax) ? mtilenmax : reqMtilen;
+        }
+        return newMtilen;
+    }
+
+    Fault
+    %(class_name)s::execute(ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(code)s;
+
+        mtilenmax =  getMtilenMax(mrlen, melen);
+        uint32_t new_mtilen = getNewMtilen(
+            current_mtilen, requested_mtilen, mtilenmax, rd_bits, rs1_bits);
+
+        %(write_code)s;
+
+        %(op_wb)s;
+        return NoFault;
+    }
+}};
+
+def template MSetTileniBranchTarget {{
+    std::unique_ptr<PCStateBase>
+    %(class_name)s::branchTarget(const PCStateBase &branch_pc) const
+    {
+        auto &rpc = branch_pc.as<RiscvISA::PCState>();
+
+        uint64_t rd_bits = machInst.rd;
+        uint64_t rs1_bits = -1;
+        uint64_t requested_mtilen = imm10;
+
+        MTYPE current_mtype = rpc.mtype();
+        uint32_t melen = getMelen(current_mtype.msew, current_mtype.msew);
+        uint32_t mtilenmax =  getMtilenMax(mrlen, melen);
+        uint32_t new_mtilen = getNewMtilen(
+           rpc.mtilen(), requested_mtilen, mtilenmax, rd_bits, rs1_bits);
+
+        std::unique_ptr<PCState> npc(dynamic_cast<PCState*>(rpc.clone()));
+        npc->set(rvSext(npc->pc() + 4));
+        npc->new_mconf(true);
+        npc->mtilen(new_mtilen);
+        return npc;
+    }
+}};

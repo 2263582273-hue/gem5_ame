@@ -1,0 +1,512 @@
+// Matrix Extension
+
+def template MMemMacroDeclare {{
+class %(class_name)s : public %(base_class)s
+{
+private:
+    %(reg_idx_arr_decl)s;
+public:
+    %(class_name)s(ExtMachInst _machInst);
+    %(class_name)s(ExtMachInst _machInst, uint32_t _mlen, uint32_t _mrlen,
+                   uint32_t _mtilem, uint32_t _mtilek, uint32_t _mtilen, MTYPE _mtype);
+    using %(base_class)s::generateDisassembly;
+};
+}};
+
+def template MMemTemplateMacroDeclare {{
+template<typename ElemType>
+class %(class_name)s : public %(base_class)s
+{
+private:
+    %(reg_idx_arr_decl)s;
+public:
+    %(class_name)s(ExtMachInst _machInst);
+    %(class_name)s(ExtMachInst _machInst, uint32_t _mlen, uint32_t _mrlen,
+                   uint32_t _mtilem, uint32_t _mtilek, uint32_t _mtilen, MTYPE _mtype);
+    using %(base_class)s::generateDisassembly;
+};
+}};
+
+def template MleConstructor {{
+
+template<typename ElemType>
+%(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst,
+                                         uint32_t _mlen,
+                                         uint32_t _mrlen, uint32_t _mtilem,
+                                         uint32_t _mtilek, uint32_t _mtilen,
+                                         MTYPE _mtype)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s, _mlen, _mrlen,
+                    _mtilem, _mtilek, _mtilen, _mtype)
+{
+    %(set_reg_idx_arr)s;
+
+    uint32_t md = _machInst.md;
+    if (_machInst.mfunct6 == 0 || _machInst.mfunct6 == 3) {
+        md |= 8;
+    }
+
+        setDestRegIdx(_numDestRegs++, matRegClass[md]);
+        _numTypedDestRegs[matRegClass.type()]++;
+        setSrcRegIdx(_numSrcRegs++, ((RS1) == 0) ? RegId() : intRegClass[RS1]);
+        setSrcRegIdx(_numSrcRegs++, ((RS2) == 0) ? RegId() : intRegClass[RS2]);
+        flags[IsInteger] = true;
+        flags[IsLoad] = true;
+        flags[IsMatrix] = true;
+
+    uint32_t num_microops = getMtileRow(machInst.mfunct6, mlen, mrlen, mtilem, mtilek);
+    int32_t remaining_microops = num_microops;
+
+    StaticInstPtr microop;
+
+    if (remaining_microops == 0) {
+        microop = new MatrixNopMicroInst(_machInst);
+        this->microops.push_back(microop);
+    }
+
+    for (int i = 0; i < num_microops; ++i) {
+        microop = new %(class_name)sMicro<ElemType>(_machInst, i,
+                                                    mlen, mrlen,
+                                                    mtilem, mtilek,
+                                                    mtilen, mtype);
+        microop->setDelayedCommit();
+        microop->setFlag(IsLoad);
+        this->microops.push_back(microop);
+        remaining_microops -= 1;
+    }
+
+    this->microops.front()->setFirstMicroop();
+    this->microops.back()->setLastMicroop();
+}
+
+%(declare_mmem_template)s;
+
+}};
+
+def template MleMicroDeclare {{
+
+template<typename ElemType>
+class %(class_name)s : public %(base_class)s
+{
+private:
+    RegId srcRegIdxArr[2];
+    RegId destRegIdxArr[1];
+public:
+    %(class_name)s(ExtMachInst _machInst,
+                   uint32_t _microIdx, uint32_t _mlen, uint32_t _mrlen,
+                   uint32_t _mtilem, uint32_t _mtilek, uint32_t _mtilen, MTYPE _mtype);
+
+    Fault execute(ExecContext *, trace::InstRecord *) const override;
+    Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
+    Fault completeAcc(PacketPtr, ExecContext *,
+                      trace::InstRecord *) const override;
+    using %(base_class)s::generateDisassembly;
+};
+}};
+
+def template MleMicroConstructor {{
+
+template<typename ElemType>
+%(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst,
+                              uint32_t _microIdx, uint32_t _mlen,
+                              uint32_t _mrlen, uint32_t _mtilem,
+                              uint32_t _mtilek, uint32_t _mtilen, MTYPE _mtype)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                   _microIdx, _mlen, _mrlen, _mtilem, _mtilek, _mtilen, _mtype)
+{
+    %(set_reg_idx_arr)s;
+    _numSrcRegs = 0;
+    _numDestRegs = 0;
+    uint32_t md = _machInst.md;
+    if (_machInst.mfunct6 == 0 || _machInst.mfunct6 == 3) {
+        md |= 8;
+    }
+    setDestRegIdx(_numDestRegs++, matRegClass[md]);
+    _numTypedDestRegs[MatRegClass]++;
+
+    setSrcRegIdx(_numSrcRegs++, intRegClass[_machInst.rs1]);
+    setSrcRegIdx(_numSrcRegs++, intRegClass[_machInst.rs2]);
+    flags[IsInteger] = true;
+	flags[IsLoad] = true;
+	flags[IsMatrix] = true;
+}
+
+%(declare_mmem_template)s;
+
+}};
+
+def template MleMicroExecute {{
+
+template<typename ElemType>
+Fault
+%(class_name)s<ElemType>::execute(ExecContext *xc,
+                                  trace::InstRecord *traceData) const
+{
+    Addr EA;
+
+    MISA misa = xc->readMiscReg(MISCREG_ISA);
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+        DPRINTF(AME, "%u %u\n", misa.rvmatrix, status.ms);
+        return std::make_shared<IllegalInstFault>(
+            "RVMatrix disabled or MPU is off", machInst);
+    }
+    if (machInst.mill)
+        return std::make_shared<IllegalInstFault>("MILL is set", machInst);
+    status.ms = MPUStatus::DIRTY;
+    xc->setMiscReg(MISCREG_STATUS, status);
+
+    %(op_decl)s;
+    %(op_rd)s;
+    %(set_mlenb)s;
+    %(set_mrlenb)s;
+    %(ea_code)s;
+
+    DPRINTF(AME, "micro %d\n", microIdx);
+    uint32_t melen = getMelen(eew, machInst.mtype9.msew);
+    uint32_t elem_per_row = getMtileCol(machInst.mfunct6,
+                                        mrlen, melen,
+                                        mtilek, mtilen);
+    uint32_t mtile_rlenb = melen * elem_per_row / 8;
+
+    const std::vector<bool> byte_enable(mtile_rlenb, true);
+    Fault fault = xc->readMem(EA, Mem.as<uint8_t>(),
+                              mtile_rlenb,
+                              memAccessFlags,
+                              byte_enable);
+
+    %(fault_code)s;
+
+    if (fault != NoFault)
+        return fault;
+
+    for(size_t i = 0; i < elem_per_row; i++) {
+        %(memacc_code)s;
+    }
+
+    %(op_wb)s;
+    return fault;
+}
+
+%(declare_mmem_template)s;
+
+}};
+
+def template MleMicroInitiateAcc {{
+
+template<typename ElemType>
+Fault
+%(class_name)s<ElemType>::initiateAcc(ExecContext* xc,
+                            trace::InstRecord* traceData) const
+{
+    Addr EA;
+
+    MISA misa = xc->readMiscReg(MISCREG_ISA);
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+        return std::make_shared<IllegalInstFault>(
+            "RVMatrix disabled or MPU is off", machInst);
+    }
+    if (machInst.mill)
+        return std::make_shared<IllegalInstFault>("MILL is set", machInst);
+
+    %(op_src_decl)s;
+    %(op_rd)s;
+    %(set_mlenb)s;
+    %(set_mrlenb)s;
+    %(ea_code)s;
+
+    DPRINTF(AME, "init micro %d\n", microIdx);
+    uint32_t melen = getMelen(eew, machInst.mtype9.msew);
+    uint32_t elem_per_row = getMtileCol(machInst.mfunct6,
+                                        mrlen, melen,
+                                        mtilek, mtilen);
+    uint32_t mtile_rlenb = melen * elem_per_row / 8;
+
+    const std::vector<bool> byte_enable(mtile_rlenb, true);
+
+    Fault fault = initiateMemRead(xc, EA, mtile_rlenb, memAccessFlags,
+                                  byte_enable);
+
+    %(fault_code)s;
+
+    return fault;
+}
+
+
+}};
+
+def template MleMicroCompleteAcc {{
+
+template<typename ElemType>
+Fault
+%(class_name)s<ElemType>::completeAcc(PacketPtr pkt, ExecContext *xc,
+                            trace::InstRecord *traceData) const
+{
+    %(op_decl)s;
+    %(op_rd)s;
+    %(set_mrlenb)s;
+
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    status.ms = MPUStatus::DIRTY;
+    xc->setMiscReg(MISCREG_STATUS, status);
+
+    memcpy(Mem.as<uint8_t>(), pkt->getPtr<uint8_t>(), pkt->getSize());
+
+    uint32_t melen = getMelen(eew, machInst.mtype9.msew);
+    uint32_t elem_per_row = getMtileCol(machInst.mfunct6,
+                                        mrlen, melen,
+                                        mtilek, mtilen);
+
+    for(size_t i = 0; i < elem_per_row; i++) {
+        %(memacc_code)s;
+    }
+    %(op_wb)s;
+
+    return NoFault;
+}
+
+
+}};
+
+def template MseConstructor {{
+
+template<typename ElemType>
+%(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst,
+                                         uint32_t _mlen,
+                                         uint32_t _mrlen, uint32_t _mtilem,
+                                         uint32_t _mtilek, uint32_t _mtilen,
+                                         MTYPE _mtype)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s, _mlen, _mrlen,
+                    _mtilem, _mtilek, _mtilen, _mtype)
+{
+    %(set_reg_idx_arr)s;
+
+    uint32_t ms3 = _machInst.ms3;
+    if (_machInst.mfunct6 == 0 || _machInst.mfunct6 == 3) {
+        ms3 |= 8;
+    }
+
+        // setDestRegIdx(_numDestRegs++, matRegClass[ms3]);
+        // _numTypedDestRegs[matRegClass.type()]++;
+        setSrcRegIdx(_numSrcRegs++, ((RS1) == 0) ? RegId() : intRegClass[RS1]);
+        setSrcRegIdx(_numSrcRegs++, ((RS2) == 0) ? RegId() : intRegClass[RS2]);
+        setSrcRegIdx(_numSrcRegs++, matRegClass[ms3]);
+        flags[IsInteger] = true;
+        flags[IsStore] = true;
+        flags[IsMatrix] = true;;
+
+    uint32_t num_microops = getMtileRow(_machInst.mfunct6, mlen,
+                                        mrlen, mtilem, mtilek);
+    int32_t remaining_microops = num_microops;
+
+    StaticInstPtr microop;
+
+    if (remaining_microops == 0) {
+        microop = new MatrixNopMicroInst(_machInst);
+        this->microops.push_back(microop);
+    }
+
+    for (int i = 0; i < num_microops; ++i) {
+        microop = new %(class_name)sMicro<ElemType>(_machInst, i,
+                                                    mlen, mrlen,
+                                                    mtilem, mtilek,
+                                                    mtilen, mtype);
+        microop->setDelayedCommit();
+        microop->setFlag(IsStore);
+        this->microops.push_back(microop);
+        remaining_microops -= 1;
+    }
+
+    this->microops.front()->setFirstMicroop();
+    this->microops.back()->setLastMicroop();
+}
+
+%(declare_mmem_template)s;
+
+}};
+
+def template MseMicroDeclare {{
+
+template<typename ElemType>
+class %(class_name)s : public %(base_class)s
+{
+private:
+    RegId srcRegIdxArr[3];
+    RegId destRegIdxArr[1];
+public:
+    %(class_name)s(ExtMachInst _machInst,
+                   uint32_t _microIdx, uint32_t _mlen, uint32_t _mrlen,
+                   uint32_t _mtilem, uint32_t _mtilek, uint32_t _mtilen, MTYPE _mtype);
+
+    Fault execute(ExecContext *, trace::InstRecord *) const override;
+    Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
+    Fault completeAcc(PacketPtr, ExecContext *,
+                      trace::InstRecord *) const override;
+    using %(base_class)s::generateDisassembly;
+};
+}};
+
+def template MseMicroConstructor {{
+template<typename ElemType>
+%(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst,
+                              uint32_t _microIdx, uint32_t _mlen,
+                              uint32_t _mrlen, uint32_t _mtilem,
+                              uint32_t _mtilek, uint32_t _mtilen, MTYPE _mtype)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                   _microIdx, _mlen, _mrlen, _mtilem, _mtilek, _mtilen, _mtype)
+{
+    %(set_reg_idx_arr)s;
+    _numSrcRegs = 0;
+    _numDestRegs = 0;
+    uint32_t ms3 = _machInst.ms3;
+    if (_machInst.mfunct6 == 0 || _machInst.mfunct6 == 3) {
+        ms3 |= 8;
+    }
+    setSrcRegIdx(_numSrcRegs++, intRegClass[_machInst.rs1]);
+    setSrcRegIdx(_numSrcRegs++, intRegClass[_machInst.rs2]);
+    setSrcRegIdx(_numSrcRegs++, matRegClass[ms3]);
+
+    flags[IsInteger] = true;
+    flags[IsStore] = true;
+    flags[IsMatrix] = true;
+}
+
+%(declare_mmem_template)s;
+
+}};
+
+def template MseMicroExecute {{
+
+template<typename ElemType>
+Fault
+%(class_name)s<ElemType>::execute(ExecContext *xc,
+                                  trace::InstRecord *traceData) const
+{
+    Addr EA;
+
+    MISA misa = xc->readMiscReg(MISCREG_ISA);
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+        return std::make_shared<IllegalInstFault>(
+            "RVMatrix disabled or MPU is off", machInst);
+    }
+    if (machInst.mill)
+        return std::make_shared<IllegalInstFault>("MILL is set", machInst);
+
+    %(op_decl)s;
+    %(op_rd)s;
+    %(set_mlenb)s;
+    %(set_mrlenb)s;
+    %(ea_code)s;
+
+    uint32_t melen = getMelen(eew, machInst.mtype9.msew);
+    uint32_t elem_per_row = getMtileCol(machInst.mfunct6,
+                                        mrlen, melen,
+                                        mtilek, mtilen);
+    uint32_t mtile_rlenb = melen * elem_per_row / 8;
+
+    for(size_t i = 0; i < elem_per_row; i++) {
+        %(memacc_code)s;
+    }
+
+    const std::vector<bool> byte_enable(mtile_rlenb, true);
+
+    Fault fault = xc->writeMem(Mem.as<uint8_t>(), mtile_rlenb, EA,
+                              memAccessFlags, nullptr, byte_enable);
+
+    return fault;
+}
+
+%(declare_mmem_template)s;
+
+}};
+
+def template MseMicroInitiateAcc {{
+
+template<typename ElemType>
+Fault
+%(class_name)s<ElemType>::initiateAcc(ExecContext* xc,
+                            trace::InstRecord* traceData) const
+{
+    Addr EA;
+
+    MISA misa = xc->readMiscReg(MISCREG_ISA);
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+        return std::make_shared<IllegalInstFault>(
+            "RVMatrix disabled or MPU is off", machInst);
+    }
+
+    %(op_decl)s;
+    %(op_rd)s;
+    %(set_mlenb)s;
+    %(set_mrlenb)s;
+    %(ea_code)s;
+
+    if (machInst.mill)
+        return std::make_shared<IllegalInstFault>("MILL is set", machInst);
+
+    uint32_t melen = getMelen(eew, machInst.mtype9.msew);
+    uint32_t elem_per_row = getMtileCol(machInst.mfunct6,
+                                        mrlen, melen,
+                                        mtilek, mtilen);
+    uint32_t mtile_rlenb = melen * elem_per_row / 8;
+
+    for(size_t i = 0; i < elem_per_row; i++) {
+        %(memacc_code)s;
+    }
+
+    const std::vector<bool> byte_enable(mtile_rlenb, true);
+
+    Fault fault = xc->writeMem(Mem.as<uint8_t>(), mtile_rlenb, EA,
+                              memAccessFlags, nullptr, byte_enable);
+
+    return fault;
+}
+
+
+}};
+
+def template MseMicroCompleteAcc {{
+
+template<typename ElemType>
+Fault
+%(class_name)s<ElemType>::completeAcc(PacketPtr pkt, ExecContext* xc,
+                            trace::InstRecord* traceData) const
+{
+    return NoFault;
+}
+}};
+
+def template MMemBaseDecodeBlock {{
+    return new %(class_name)s(machInst, mlen,
+                              mrlen, mtilem,
+                              mtilek, mtilen,
+                              mtype);
+}};
+
+def template MMemTemplateDecodeBlock {{
+switch(getMelen(machInst.eew, mtype.msew)) {
+    case 8:
+        return new %(class_name)s<uint8_t>(machInst, mlen,
+                                           mrlen, mtilem,
+                                           mtilek, mtilen,
+                                           mtype);
+    case 16:
+        return new %(class_name)s<uint16_t>(machInst, mlen,
+                                            mrlen, mtilem,
+                                            mtilek, mtilen,
+                                            mtype);
+    case 32:
+        return new %(class_name)s<uint32_t>(machInst, mlen,
+                                            mrlen, mtilem,
+                                            mtilek, mtilen,
+                                            mtype);
+    case 64:
+        return new %(class_name)s<uint64_t>(machInst, mlen,
+                                            mrlen, mtilem,
+                                            mtilek, mtilen,
+                                            mtype);
+    default: GEM5_UNREACHABLE;
+}
+}};

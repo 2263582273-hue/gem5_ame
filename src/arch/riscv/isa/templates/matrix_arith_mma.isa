@@ -1,0 +1,114 @@
+output header {{
+
+#define COPY_OLD_MD(idx)                                                  \
+    if (true) {                                                           \
+        RiscvISA::mreg_t old_md;                                          \
+        xc->getRegOperand(this, idx, &old_md);                            \
+        tmp_d0 = old_md;                                                  \
+    } else {                                                              \
+        tmp_d0.set(0xff);                                                 \
+    }
+
+#define MRM_REQUIRED                                             \
+    do { \
+        uint_fast8_t frm = xc->readMiscReg(MISCREG_FRM); \
+        if (frm > 4)                                                        \
+            return std::make_shared<IllegalInstFault>("RM fault", machInst); \
+        softfloat_roundingMode = frm; \
+    } while (0)
+
+}};
+
+
+//普通计算
+def template MatrixArithMmaDeclare {{
+
+template<typename SrcType, typename DestType>
+class %(class_name)s : public %(base_class)s {
+private:
+    RegId srcRegIdxArr[3];
+    RegId destRegIdxArr[1];
+    mutable bool msat = false;
+public:
+    %(class_name)s(ExtMachInst _machInst,
+                   uint32_t _mlen, uint32_t _mrlen,
+                   uint32_t _mtilem, uint32_t _mtilek,
+                   uint32_t _mtilen, MTYPE _mtype);
+    Fault execute(ExecContext* xc, trace::InstRecord* traceData)const override;
+    using %(base_class)s::generateDisassembly;
+};
+
+}};
+
+def template MatrixArithMmaConstructor {{
+
+template<typename SrcType, typename DestType>
+%(class_name)s<SrcType, DestType>::%(class_name)s(ExtMachInst _machInst,
+                                         uint32_t _mlen,
+                                         uint32_t _mrlen,
+                                         uint32_t _mtilem,
+                                         uint32_t _mtilek,
+                                         uint32_t _mtilen,
+                                         MTYPE _mtype)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                     _mlen, _mrlen,
+                     _mtilem, _mtilek,
+                     _mtilen, _mtype)
+{
+    %(set_reg_idx_arr)s;
+    _numSrcRegs = 0;
+    _numDestRegs = 0;
+    %(set_dest_reg_idx)s;
+    %(set_src_reg_idx)s;
+}
+
+%(declare_marith_template)s;
+
+}};
+
+def template MatrixArithMmaDecodeBlock {{
+    %(decode_marith_template)s;
+}};
+
+def template MatrixArithMmaExecute {{
+template <typename SrcType, typename DestType>
+Fault
+%(class_name)s<SrcType, DestType>::execute(ExecContext* xc,
+                                  trace::InstRecord* traceData) const
+{
+    using mst [[maybe_unused]] = SrcType;
+    using mdt [[maybe_unused]] = DestType;
+    %(msu)s;
+    %(mdu)s;
+    [[maybe_unused]] constexpr size_t sew_src = sizeof(mst) * 8;
+    [[maybe_unused]] constexpr size_t sew_dest = sizeof(mdt) * 8;
+    %(mtype_mask)s;
+    [[maybe_unused]] uint64_t mst_enable = mtype_src_mask & mtype;
+    [[maybe_unused]] uint64_t mdt_enable = mtype_dest_mask & mtype;
+    using bf [[maybe_unused]]=decltype(bfloat16_t::v);
+
+    MISA misa = xc->readMiscReg(MISCREG_ISA);
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+        DPRINTF(AME, "%u %u\n", misa.rvmatrix, status.ms);
+        return std::make_shared<IllegalInstFault>(
+            "RVMatrix disabled or MPU is off", machInst);
+    }
+    if (machInst.mill)
+        return std::make_shared<IllegalInstFault>("MILL is set", machInst);
+    status.ms = MPUStatus::DIRTY;
+    xc->setMiscReg(MISCREG_STATUS, status);
+    MRM_REQUIRED
+
+    %(op_decl)s;
+    %(op_rd)s;
+    %(copy_old_md)s;
+    %(code)s;
+    %(op_wb)s;
+
+    return NoFault;
+}
+
+%(declare_marith_template)s;
+
+}};

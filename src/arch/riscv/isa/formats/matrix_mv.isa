@@ -1,0 +1,125 @@
+let {{
+    def declareMMoveTemplate(
+        class_name, type_name='uint', min_size=8, max_size=64):
+        sizes = [8, 16, 32, 64]
+        code = ''
+        for size in sizes:
+            if size < min_size or size > max_size:
+                continue
+            code += f'template class {class_name}<{type_name}{size}_t>;\n'
+        return code
+}};
+
+def format MatrixMoveFormat(code, category, *flags) {{
+    macroop_class_name = 'MatrixArithMacroInst'
+    microop_class_name = 'MatrixArithMicroInst'
+
+    iop = InstObjParams(
+        name,
+        Name,
+        macroop_class_name,
+        {'code': code,
+         'declare_marith_template': declareMMoveTemplate(Name)},
+        flags
+    )
+
+    # 根据category前缀确定目标寄存器类型
+    if category.startswith("MOPA"):
+        dest_reg_id = "matRegClass[_machInst.md | 8]"
+    elif category.startswith("MOPT"):
+        dest_reg_id = "matRegClass[_machInst.md]"
+    elif category.startswith("ROP"):
+        dest_reg_id = "intRegClass[_machInst.rd]"
+    elif category.startswith("FOP"):
+        dest_reg_id = "floatRegClass[_machInst.rd]"
+
+    # 根据category设置源寄存器类型，category = 指令目的操作数类型+源操作数类型
+    # MOP表示矩阵指令，ROP表示和int寄存器交互，FOP表示和fp寄存器交互
+    # M表示矩阵寄存器，A表示ACC寄存器，T表示Tile寄存器,R表示INT寄存器，F表示浮点寄存器
+    if category == "MOPAA":  # matA <- matA, transpose, broadcast
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        src2_reg_id = "matRegClass[_machInst.ms2]"
+        num_src_regs = 2
+    elif category == "MOPTT":  # matT <- matT,transpose, broadcast
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "matRegClass[_machInst.ms2]"
+        num_src_regs = 2
+    elif category == "MOPAT":  # matA <- matT, imm
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "matRegClass[_machInst.ms2]"
+        num_src_regs = 2
+    elif category == "MOPTA":  # matT <- matA, imm
+        src1_reg_id = "matRegClass[_machInst.ms1| 8]"
+        src2_reg_id = "matRegClass[_machInst.ms2]"
+        num_src_regs = 2
+    elif category == "MOPATR":  # matA <- matT, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPTAR":  # matT <- matA, int
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "ROPTR":  # int <- matT, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "ROPAR":  # int <- matA, int
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPTRR":  # matT <- int, int
+        src1_reg_id = "intRegClass[_machInst.rs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPARR":  # matA <- int, int
+        src1_reg_id = "intRegClass[_machInst.rs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "FOPTR":  # float <- matT, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "FOPAR":  # float <- matA, int
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPTFR":  # matT <- float, int
+        src1_reg_id = "floatRegClass[_machInst.fs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPAFR":  # matA <- float, int
+        src1_reg_id = "floatRegClass[_machInst.fs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+
+    set_dest_reg_idx = setDestWrapper(dest_reg_id)
+    set_src_reg_idx = ""
+    if src1_reg_id:
+        set_src_reg_idx += setSrcWrapper(src1_reg_id)
+    if src2_reg_id:
+        set_src_reg_idx += setSrcWrapper(src2_reg_id)
+
+    old_md_idx = num_src_regs
+
+    microiop = InstObjParams(name + "_micro",
+        Name + "Micro",
+        microop_class_name,
+        {'code': code,
+         'set_dest_reg_idx': set_dest_reg_idx,
+         'set_src_reg_idx': set_src_reg_idx,
+         'set_mlenb': setMlenb(),
+         'set_mrlenb': setMrlenb(),
+         'copy_old_md': copyOldMd(old_md_idx),
+         'declare_marith_template': declareMMoveTemplate(Name + "Micro")},
+        flags)
+
+    header_output = \
+        MatrixIntMicroDeclare.subst(microiop) + \
+        MatrixIntMacroDeclare.subst(iop)
+    decoder_output = \
+        MatrixIntMicroConstructor.subst(microiop) + \
+        MatrixIntMacroConstructor.subst(iop)
+    exec_output = MatrixIntMicroExecute.subst(microiop)
+    decode_block = MatrixIntDecodeBlock.subst(iop)
+}};

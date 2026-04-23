@@ -1,0 +1,11 @@
+'''
+Import('*')
+
+SimObject('ProcessElementTester.py', sim_objects=['ProcessElementTester'])
+Source('pe_test.cc')
+DebugFlag('ProcessElementTester')
+'''
+
+
+
+# 如果需要，添加特定的编译标志(?)

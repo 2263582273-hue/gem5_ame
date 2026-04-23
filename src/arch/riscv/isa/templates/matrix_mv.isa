@@ -1,0 +1,207 @@
+output header {{
+
+#define COPY_OLD_MD(idx)                                                  \
+    if (true) {                                                           \
+        RiscvISA::mreg_t old_md;                                          \
+        xc->getRegOperand(this, idx, &old_md);                            \
+        tmp_d0 = old_md;                                                  \
+    } else {                                                              \
+        tmp_d0.set(0xff);                                                 \
+    }                                                                     \
+
+}};
+
+
+def template MatrixIntMacroConstructor {{
+    template<typename ElemType>
+    %(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst,
+                                            uint64_t _mlen,
+                                            uint64_t _mrlen,
+                                            uint64_t _mtilem,
+                                            uint64_t _mtilek,
+                                            uint64_t _mtilen,
+                                            MTYPE _mtype)
+        : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                        _mlen, _mrlen, _mtilem, _mtilek, _mtilen, _mtype)
+    {
+        %(set_reg_idx_arr)s;
+        %(constructor)s;
+
+        // const int64_t micro_mlmax = mlen / width_EEW(_machInst.width);
+        // const int64_t micro_mrlmax = mrlen / width_EEW(_machInst.width);
+        const int64_t micro_mrowlmax = mlen / mrlen;
+
+        uint64_t num_microops = micro_mrowlmax;
+
+        // revise, ztt/2025/10/28
+        // 10,11,12,13对应的是矩阵和int/fp寄存器之间的数据移动，不需要循环
+        if ((machInst.funct7 == 10) || (machInst.funct7 == 11)
+            || (machInst.funct7 == 12) || (machInst.funct7 == 13))
+        {
+            num_microops = 1;
+        }else if(machInst.mfunct6 == 0b000111){
+            if((machInst.mfunct5 == 0b10100)
+                || (machInst.mfunct5 == 0b10101)
+                || (machInst.mfunct5 == 0b10110)
+                || (machInst.mfunct5 == 0b11001)
+                || (machInst.mfunct5 == 0b11010)
+                || (machInst.mfunct5 == 0b11000)){
+                // mbcar,mbcbr,mbccr指令之外的其它broadcast指令按列拆分成microop
+                // 所以microop的个数=列数，与A/B/C矩阵有关
+                if(machInst.ml == 0b01) {
+                        num_microops = mtilek;
+                }else {
+                        num_microops = mtilen;
+                }
+            }else {
+                // mbcar,mbcbr,mbccr指令按行拆分成microop，所以microop的个数=行数，与A/B/C矩阵有关
+                if(machInst.ml == 0b10) {
+                        num_microops = mtilek;
+                }else {
+                        num_microops = mtilem;
+                }
+            }
+        }else {
+            num_microops = mtilem;
+        }
+
+
+        int64_t remaining_microops = micro_mrowlmax;
+        StaticInstPtr microop;
+
+        if (remaining_microops == 0) {
+            microop = new MatrixNopMicroInst(_machInst);
+            this->microops.push_back(microop);
+        }
+
+        for (int i = 0; i < num_microops; ++i) {
+            microop = new %(class_name)sMicro<ElemType>
+                (_machInst, i, mlen, mrlen, mtilem, mtilek, mtilen, mtype);
+            microop->setDelayedCommit();
+            this->microops.push_back(microop);
+            remaining_microops -= 1;
+        }
+
+        this->microops.front()->setFirstMicroop();
+        this->microops.back()->setLastMicroop();
+    }
+
+    %(declare_marith_template)s;
+}};
+
+def template MatrixIntMicroExecute {{
+    template <typename ElemType>
+    Fault
+    %(class_name)s<ElemType>::execute(ExecContext* xc,
+                                    trace::InstRecord* traceData) const
+    {
+        using mu [[maybe_unused]] = std::make_unsigned_t<ElemType>;
+        using mi [[maybe_unused]] = std::make_signed_t<ElemType>;
+
+        MISA misa = xc->readMiscReg(MISCREG_ISA);
+        STATUS status = xc->readMiscReg(MISCREG_STATUS);
+        // if (!misa.rvm || status.ms == MPUStatus::OFF) {
+        //     return std::make_shared<IllegalInstFault>(
+        //         "RVM is disabled or MPU is off", machInst);
+        // }
+
+        // if (machInst.mill)
+        //     return std::make_shared<IllegalInstFault>
+        //            ("MILL is set", machInst);
+
+        // status.ms = MPUStatus::DIRTY;
+        // xc->setMiscReg(MISCREG_STATUS, status);
+
+        %(op_decl)s;
+        %(op_rd)s;
+
+        %(set_mlenb)s;
+        %(set_mrlenb)s;
+
+        uint32_t elem_size = getMvEEW(machInst.width) / 8;
+        [[maybe_unused]] uint32_t elem = mrlenb / elem_size;
+
+        // 用于执行代码的elem和每个microop的循环次数并不相同
+        // 前者=Rlen/EEW，后者等于实际需要计算的元素个数
+        uint32_t num_roops = mrlenb / elem_size;
+        // revise, ztt/2025/10/28
+        if (machInst.mmvdi == 0) {
+            if(machInst.mfunct6 == 0b000111) {
+                // broadcast和transpose指令
+                if((machInst.mfunct5 == 0b10100)
+                    || (machInst.mfunct5 == 0b10101)
+                    || (machInst.mfunct5 == 0b10110)
+                    || (machInst.mfunct5 == 0b11001)
+                    || (machInst.mfunct5 == 0b11010)
+                    || (machInst.mfunct5 == 0b11000)){
+                    // mbcar,mbcbr,mbccr指令之外的其它broadcast指令按列拆分成microop
+                    // 所以每列的循环次数=行数
+                    num_roops = mtilem;
+                    if(machInst.ml == 0b10) {
+                        num_roops = mtilek;
+                    }else {
+                        num_roops = mtilem;
+                    }
+                }
+                else if((machInst.mfunct5 == 0b10000)
+                    || (machInst.mfunct5 == 0b10001)
+                    || (machInst.mfunct5 == 0b10010)) {
+                    // mbcar,mbcbr,mbccr指令按行拆分成microop
+                    // 由于未知列元素位宽，而处理的时候全部视作8bit来处理
+                    // 所以每行循环次数固定为row_size（128）/8=16
+                    num_roops = 16;
+                }else {
+                    // 转置矩阵指令按行拆分成microop
+                    // 所以每行的循环次数=列数，列数根据A/B/C矩阵选择k/n/n
+                    if(machInst.ml == 0b01) {
+                        num_roops = mtilek;
+                    }else {
+                        num_roops = mtilen;
+                    }
+                }
+            } else {
+                // mmve指令中t——a的部分，都按行拆分，所以每行的循环次数=列数，列数选择acc(C)矩阵的列尺寸n
+                num_roops = mtilen;
+            }
+        } else {
+            // mmve指令中a——t的部分，都按行拆分，所以每行的循环次数=列数，列数选择tile(A)矩阵的列尺寸k
+            num_roops = mtilek;
+        }
+
+        size_t i = 0;
+
+        // revise, ztt/2025/10/28
+        // 10,11,12,13对应的是矩阵和int/fp寄存器之间的数据移动，不需要循环
+        if (machInst.funct7 == 10 || machInst.funct7 == 11
+            || machInst.funct7 == 12 || machInst.funct7 == 13)
+        {
+            %(code)s;
+        } else
+        {
+            for(; i < num_roops; i++)
+            {
+                %(code)s;
+            }
+        }
+
+        %(op_wb)s;
+
+        return NoFault;
+    }
+
+    %(declare_marith_template)s;
+}};
+
+def template MatrixIntDecodeBlock {{
+    switch(mtype.msew) {
+        case 0b000: return new %(class_name)s<uint8_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        case 0b001: return new %(class_name)s<uint16_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        case 0b010: return new %(class_name)s<uint32_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        case 0b011: return new %(class_name)s<uint64_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        default: GEM5_UNREACHABLE;
+    }
+}};

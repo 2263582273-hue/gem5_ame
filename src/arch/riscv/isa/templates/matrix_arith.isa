@@ -1,0 +1,354 @@
+output header {{
+
+#define COPY_OLD_MD(idx)                                                  \
+    if (true) {                                                           \
+        RiscvISA::mreg_t old_md;                                          \
+        xc->getRegOperand(this, idx, &old_md);                            \
+        tmp_d0 = old_md;                                                  \
+    } else {                                                              \
+        tmp_d0.set(0xff);                                                 \
+    }
+
+#define MRM_REQUIRED                                             \
+    do { \
+        uint_fast8_t frm = xc->readMiscReg(MISCREG_FRM); \
+        if (frm > 4)                                                        \
+            return std::make_shared<IllegalInstFault>("RM fault", machInst); \
+        softfloat_roundingMode = frm; \
+    } while (0)
+
+}};
+
+
+//普通计算
+def template MatrixArithMacroDeclare {{
+
+template<typename SrcType, typename DestType>
+class %(class_name)s : public %(base_class)s {
+private:
+    RegId srcRegIdxArr[3];
+    RegId destRegIdxArr[1];
+    bool msat = false;
+public:
+    %(class_name)s(ExtMachInst _machInst,
+                   uint32_t _mlen, uint32_t _mrlen,
+                   uint32_t _mtilem, uint32_t _mtilek,
+                   uint32_t _mtilen, MTYPE _mtype);
+    using %(base_class)s::generateDisassembly;
+};
+
+}};
+
+def template MatrixArithMacroConstructor {{
+
+template<typename SrcType, typename DestType>
+%(class_name)s<SrcType, DestType>::%(class_name)s(ExtMachInst _machInst,
+                                         uint32_t _mlen,
+                                         uint32_t _mrlen,
+                                         uint32_t _mtilem,
+                                         uint32_t _mtilek,
+                                         uint32_t _mtilen,
+                                         MTYPE _mtype)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                     _mlen, _mrlen,
+                     _mtilem, _mtilek,
+                     _mtilen, _mtype)
+{
+    %(set_reg_idx_arr)s;
+    _numSrcRegs = 0;
+    _numDestRegs = 0;
+    %(set_dest_reg_idx)s;
+    %(set_src_reg_idx)s;
+
+    const uint32_t num_microops = mtilem;
+    StaticInstPtr microop;
+    if (num_microops == 0) {
+        DPRINTF(AME, "mtilem is 0\n");
+        microop = new MatrixNopMicroInst(_machInst);
+        this->microops.push_back(microop);
+    }
+    DPRINTF(AME, "m is %d, n is %d, k is %d\n", mtilem, mtilen, mtilek);
+
+    for (int i = 0; i < num_microops; ++i) {
+        microop = new %(class_name)sMicro<SrcType, DestType>(_machInst,
+                                                    i,
+                                                    _mlen,
+                                                    _mrlen,
+                                                    _mtilem,
+                                                    _mtilek,
+                                                    _mtilen,
+                                                    _mtype,
+                                                    &msat);
+        microop->setDelayedCommit();
+        this->microops.push_back(microop);
+    }
+
+    this->microops.front()->setFirstMicroop();
+    this->microops.back()->setLastMicroop();
+}
+
+%(declare_marith_template)s;
+
+}};
+
+def template MatrixArithMicroDeclare {{
+
+template<typename SrcType, typename DestType>
+class %(class_name)s : public %(base_class)s
+{
+private:
+    RegId srcRegIdxArr[3];
+    RegId destRegIdxArr[1];
+    bool* msat;
+public:
+    %(class_name)s(ExtMachInst _machInst,
+                   uint32_t _microIdx, uint32_t _mlen,
+                   uint32_t _mrlen, uint32_t _mtilem,
+                   uint32_t _mtilek, uint32_t _mtilen,
+                   MTYPE _mtype, bool* msat);
+    Fault execute(ExecContext* xc, trace::InstRecord* traceData)const override;
+    using %(base_class)s::generateDisassembly;
+};
+
+}};
+
+def template MatrixArithMicroConstructor {{
+
+template<typename SrcType, typename DestType>
+%(class_name)s<SrcType, DestType>::%(class_name)s(ExtMachInst _machInst,
+                                         uint32_t _microIdx,
+                                         uint32_t _mlen,
+                                         uint32_t _mrlen,
+                                         uint32_t _mtilem,
+                                         uint32_t _mtilek,
+                                         uint32_t _mtilen,
+                                         MTYPE _mtype,
+                                         bool* msat)
+    : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                     _microIdx, _mlen,
+                     _mrlen, _mtilem,
+                     _mtilek, _mtilen,
+                     _mtype)
+{
+    this->msat = msat;
+    %(set_reg_idx_arr)s;
+    _numSrcRegs = 0;
+    _numDestRegs = 0;
+    %(set_dest_reg_idx)s;
+    %(set_src_reg_idx)s;
+}
+
+%(declare_marith_template)s;
+
+}};
+
+def template MatrixArithMicroExecute {{
+
+template <typename SrcType, typename DestType>
+Fault
+%(class_name)s<SrcType, DestType>::execute(ExecContext* xc,
+                                  trace::InstRecord* traceData) const
+{
+    using mst [[maybe_unused]] = SrcType;
+    using mdt [[maybe_unused]] = DestType;
+    %(msu)s;
+    %(mdu)s;
+    [[maybe_unused]] constexpr size_t sew_src = sizeof(mst) * 8;
+    [[maybe_unused]] constexpr size_t sew_dest = sizeof(mdt) * 8;
+    %(mtype_mask)s;
+    [[maybe_unused]] uint64_t mst_enable = mtype_src_mask & mtype;
+    [[maybe_unused]] uint64_t mdt_enable = mtype_dest_mask & mtype;
+    using bf [[maybe_unused]]=decltype(bfloat16_t::v);
+
+    MISA misa = xc->readMiscReg(MISCREG_ISA);
+    STATUS status = xc->readMiscReg(MISCREG_STATUS);
+    if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+        DPRINTF(AME, "%u %u\n", misa.rvmatrix, status.ms);
+        return std::make_shared<IllegalInstFault>(
+            "RVMatrix disabled or MPU is off", machInst);
+    }
+    if (machInst.mill)
+        return std::make_shared<IllegalInstFault>("MILL is set", machInst);
+    status.ms = MPUStatus::DIRTY;
+    xc->setMiscReg(MISCREG_STATUS, status);
+    MRM_REQUIRED
+
+    %(op_decl)s;
+    %(op_rd)s;
+    %(copy_old_md)s;
+    %(code)s;
+    %(op_wb)s;
+
+    return NoFault;
+}
+
+%(declare_marith_template)s;
+
+}};
+
+def template MatrixArithDecodeBlock {{
+    %(decode_marith_template)s;
+}};
+
+def template MatrixIntMicroDeclare {{
+    template<typename ElemType>
+    class %(class_name)s : public %(base_class)s
+    {
+      private:
+        RegId srcRegIdxArr[2];
+        RegId destRegIdxArr[1];
+      public:
+        %(class_name)s(ExtMachInst _machInst, uint32_t _microIdx,
+                      uint64_t _mlen, uint64_t _mrlen, uint64_t _mtilem,
+                      uint64_t _mtilek, uint64_t _mtilen, MTYPE _mtype);
+        Fault execute(ExecContext* xc, trace::InstRecord* traceData)const override;
+        using %(base_class)s::generateDisassembly;
+    };
+}};
+
+def template MatrixIntMacroDeclare {{
+    template<typename ElemType>
+    class %(class_name)s : public %(base_class)s {
+      private:
+        %(reg_idx_arr_decl)s;
+      public:
+        %(class_name)s(ExtMachInst _machInst,
+                      uint64_t _mlen, uint64_t _mrlen, uint64_t _mtilem,
+                      uint64_t _mtilek, uint64_t _mtilen, MTYPE _mtype);
+        using %(base_class)s::generateDisassembly;
+    };
+}};
+
+def template MatrixIntMicroConstructor {{
+    template<typename ElemType>
+    %(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst, uint32_t _microIdx,
+                                            uint64_t _mlen, uint64_t _mrlen,
+                                            uint64_t _mtilem, uint64_t _mtilek,
+                                            uint64_t _mtilen, MTYPE _mtype)
+        : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                        _microIdx, _mlen, _mrlen,
+                        _mtilem, _mtilek, _mtilen, _mtype)
+    {
+        %(set_reg_idx_arr)s;
+        _numSrcRegs = 0;
+        _numDestRegs = 0;
+        %(set_dest_reg_idx)s;
+        %(set_src_reg_idx)s;
+    }
+
+    %(declare_marith_template)s;
+}};
+
+def template MatrixFloatCvtMacroConstructor {{
+    template<typename ElemType>
+    %(class_name)s<ElemType>::%(class_name)s(ExtMachInst _machInst,
+                                            uint64_t _mlen, uint64_t _mrlen,
+                                            uint64_t _mtilem, uint64_t _mtilek,
+                                            uint64_t _mtilen, MTYPE _mtype)
+        : %(base_class)s("%(mnemonic)s", _machInst, %(op_class)s,
+                        _mlen, _mrlen, _mtilem, _mtilek, _mtilen, _mtype)
+    {
+        %(set_reg_idx_arr)s;
+        _numSrcRegs = 0;
+        _numDestRegs = 0;
+        %(set_dest_reg_idx)s;
+        %(set_src_reg_idx)s;
+
+        uint64_t num_microops = mtilem;
+
+        int64_t remaining_microops = mtilem;
+        StaticInstPtr microop;
+
+        if (remaining_microops == 0) {
+            microop = new MatrixNopMicroInst(_machInst);
+            this->microops.push_back(microop);
+        }
+
+        for (int i = 0; i < num_microops; ++i) {
+            microop = new %(class_name)sMicro<ElemType>(_machInst, i, mlen, mrlen, mtilem, mtilek, mtilen, mtype);
+            microop->setDelayedCommit();
+            this->microops.push_back(microop);
+            remaining_microops -= 1;
+        }
+
+        this->microops.front()->setFirstMicroop();
+        this->microops.back()->setLastMicroop();
+    }
+
+    %(declare_marith_template)s;
+}};
+def template MatrixFloatCvtMicroExecute {{
+    template <typename ElemType>
+    Fault
+    %(class_name)s<ElemType>::execute(ExecContext* xc,
+                                    trace::InstRecord* traceData) const
+    {
+            using et = ElemType;
+            using ewt = typename double_width<et>::type;
+            using ent = typename half_width<et>::type;
+            using mu [[maybe_unused]] = decltype(et::v);
+            using mwu = decltype(ewt::v);
+            using mnu = decltype(ent::v);
+            using mhf = decltype(float16_t::v);
+            using mf = decltype(float32_t::v);
+            using bf=decltype(bfloat16_t::v);
+        using et [[maybe_unused]] = ElemType;
+        using mu [[maybe_unused]] = decltype(et::v);
+
+        using ewt [[maybe_unused]] = typename double_width<et>::type;
+        using mwu [[maybe_unused]] = decltype(ewt::v);
+
+
+        using ent [[maybe_unused]] = typename half_width<et>::type;
+        using mnu [[maybe_unused]] = decltype(ent::v);
+
+
+        using bf [[maybe_unused]] =decltype(bfloat16_t::v);
+
+
+        MISA misa = xc->readMiscReg(MISCREG_ISA);
+        STATUS status = xc->readMiscReg(MISCREG_STATUS);
+        if (!misa.rvmatrix || status.ms == MPUStatus::OFF) {
+            return std::make_shared<IllegalInstFault>(
+                "RVM is disabled or MPU is off", machInst);
+        }
+
+        %(op_decl)s;
+        %(op_rd)s;
+        %(set_mlenb)s;
+        %(set_mrlenb)s;
+        %(copy_old_md)s;
+
+        //if (!hasFloatEEW(machInst.eew, mtype.eew) || !hasFloatEEW(machInst.f3, mtype.eew)) {
+        //  return std::make_shared<IllegalInstFault>(
+        //    "Matrix FP convert: element width not enabled", mtype);
+        // }
+
+        uint32_t elem = mtilen;
+        size_t i = 0;
+
+        for(; i < elem; i++)
+        {
+            %(code)s;
+        }
+
+
+        %(op_wb)s;
+
+        return NoFault;
+    }
+
+    %(declare_marith_template)s;
+}};
+def template MatrixFloatWideningAndNarrowingCvtDecodeBlock {{
+    switch(mtype.msew) {
+        case 0b000: return new %(class_name)s<float8_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        case 0b001: return new %(class_name)s<float16_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        case 0b010: return new %(class_name)s<float32_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        case 0b011: return new %(class_name)s<float64_t>(machInst, mlen, mrlen,
+                                         mtilem, mtilek, mtilen, mtype);
+        default: GEM5_UNREACHABLE;}
+}};

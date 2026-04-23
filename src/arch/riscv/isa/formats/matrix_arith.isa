@@ -1,0 +1,439 @@
+let {{
+
+    def mloopWrapper(code, micro_inst = True):
+        if micro_inst:
+            upper_bound = "mtilen"
+        else:
+            upper_bound = "mtilem"
+        return '''
+            for (uint32_t i = 0; i < %s; i++) {
+                %s
+            }
+        ''' % (upper_bound, code)
+
+    def setMlenb():
+        return "[[maybe_unused]] uint32_t mlenb = mlen >> 3;\n"
+
+    def setMrlenb():
+        return "[[maybe_unused]] uint32_t mrlenb = mrlen >> 3;\n"
+
+    def setDestWrapper(destRegId):
+        return "setDestRegIdx(_numDestRegs++, " + destRegId + ");\n" + \
+               "_numTypedDestRegs[MatRegClass]++;\n"
+
+    def setSrcWrapper(srcRegId):
+        return "setSrcRegIdx(_numSrcRegs++, " + srcRegId + ");\n"
+
+    def copyOldMd(md_idx):
+        return 'COPY_OLD_MD(%d);' % md_idx
+
+    def declareMArithTemplate(
+        class_name, type_name, widen, min_size=8, max_size=64):
+        sizes = [8, 16, 32, 64]
+        # float_types = {16: '_Float16', 32: 'float', 64: 'double'}
+        if type_name == 'float':
+            min_size = 16
+        code = ''
+        for size in sizes:
+            dest_size = size * widen
+            if size < min_size or size > max_size:
+                continue
+            if dest_size < min_size or dest_size > max_size:
+                continue
+            code += f'template class {class_name}'
+            # if type_name == 'float':
+            #    code += f'<{float_types[size]}, '
+            #    code += f'{float_types[dest_size]}>;\n'
+            # else:
+            code += f'<{type_name}{size}_t, {type_name}{dest_size}_t>;\n'
+        return code
+
+    def decodeMArithTemplate(
+        class_name, type_name, widen, min_size=8, max_size=64):
+        sizes = [8, 16, 32, 64]
+        # float_types = {16: '_Float16', 32: 'float', 64: 'double'}
+        if type_name == 'float':
+            min_size = 16
+        code = 'switch(getMelen(machInst.eew, mtype.msew)) {\n'
+        for size in sizes:
+            dest_size = size * widen
+            if size < min_size or size > max_size:
+                continue
+            if dest_size < min_size or dest_size > max_size:
+                continue
+            code += f'case {size}: return new class {class_name}'
+            code += f'<{type_name}{size}_t, {type_name}{dest_size}_t>'
+            code += """(
+            machInst, mlen,
+            mrlen, mtilem,
+            mtilek, mtilen,
+            mtype);\n"""
+        code += 'default: GEM5_UNREACHABLE;}\n'
+        return code
+
+    def get_mu_type(type_name):
+        msu = "using msu [[maybe_unused]] = "
+        mdu = "using mdu [[maybe_unused]] = "
+        if type_name == 'float':
+            msu += "decltype(SrcType::v);\n"
+            mdu += "decltype(DestType::v);\n"
+        else:
+            msu += "std::make_unsigned_t<SrcType>;\n"
+            mdu += "std::make_unsigned_t<DestType>;\n"
+
+        return msu, mdu
+
+    def get_mtype_mask(type_name):
+        mtype_src_mask = 'MTYPE mtype_src_mask = '
+        mtype_dest_mask = 'MTYPE mtype_dest_mask = '
+        width = 1
+        if type_name == 'float':
+            width = 2
+        default = (1 << width) - 1
+        mtype_src_mask += \
+            f'{default} << ((int)(log2(sew_src) + 1) * {width});\n'
+        mtype_dest_mask += \
+            f'{default} << ((int)(log2(sew_dest) + 1) * {width});\n'
+        return mtype_src_mask + mtype_dest_mask
+    def declareMArithCvtTemplate(
+        class_name,
+        src_type_name,
+        dst_type_name,
+        widen,
+        min_size=8,
+        max_size=64):
+        sizes = [8, 16, 32, 64]
+
+        code = ''
+        for size in sizes:
+            # 源类型是 float 时，最小 16
+            if src_type_name.lower() == 'float' and size < 16:
+                continue
+            if size < min_size or size > max_size:
+                continue
+
+            # 计算目标位宽：允许 0.5/2 等小数倍率，但必须落到整数且在允许集合中
+            dest_size_f = size * float(widen)
+            dest_size = int(round(dest_size_f))
+            if abs(dest_size_f - dest_size) > 1e-9:
+                continue                # 非整数，跳过
+            if dest_size not in sizes:
+                continue                # 不在 {8,16,32,64}，跳过
+            if dst_type_name.lower() == 'float' and dest_size < 16:
+                continue
+            if dest_size < min_size or dest_size > max_size:
+                continue
+            code += (
+                f"template class {class_name}<"
+                f"{src_type_name}{size}_t, "
+                f"{dst_type_name}{dest_size}_t>;\n"
+            )
+        return code
+    def decodeMArithCvtTemplate(
+        class_name,
+        src_type_name,
+        dst_type_name,
+        widen,
+        min_size=8,
+        max_size=64):
+        sizes = [8, 16, 32, 64]
+
+        # 如果源或目的类型是 float，最小 16 bit
+        min_src = 16 if str(src_type_name).lower() == 'float' else min_size
+        min_dst = 16 if str(dst_type_name).lower() == 'float' else min_size
+
+        code = 'switch(getMelen(machInst.eew, mtype.msew)) {\n'
+
+        for size in sizes:
+            if size < min_src or size > max_size:
+                continue
+
+            dest_size_f = size * float(widen)
+            dest_size = int(round(dest_size_f))
+            if abs(dest_size_f - dest_size) > 1e-9:
+                continue      # 必须是整数
+            if dest_size not in sizes:
+                continue
+            if dest_size < min_dst or dest_size > max_size:
+                continue
+
+            code += f'case {size}: return new class {class_name}'
+            code += f'<{src_type_name}{size}_t, {dst_type_name}{dest_size}_t>'
+            code += """(
+                machInst, mlen,
+                mrlen, mtilem,
+                mtilek, mtilen,
+                mtype);\n"""
+
+        code += 'default: GEM5_UNREACHABLE;}\n'
+        return code
+
+    def get_CvtMu_type(src_type_name, dst_type_name):
+        msu = "using msu [[maybe_unused]] = "
+        mdu = "using mdu [[maybe_unused]] = "
+
+        # 统一大小写，避免 'Float' / 'float' 不一致
+        s = str(src_type_name).lower()
+        d = str(dst_type_name).lower()
+
+        # 源：float 家族用 SoftFloat 的位型（有 .v），否则取无符号底层整型
+        if s == 'float':
+            msu += "decltype(SrcType::v);\n"
+        else:
+            msu += "std::make_unsigned_t<SrcType>;\n"
+
+        # 目的：同理
+        if d == 'float':
+            mdu += "decltype(DestType::v);\n"
+        else:
+            mdu += "std::make_unsigned_t<DestType>;\n"
+
+        return msu, mdu
+
+}};
+
+
+
+def format MatrixArithFormat(code, category, type_name, widen, *flags) {{
+    # widen should be 1, 2, 4, default 1
+    macroop_class_name = 'MatrixArithMacroInst'
+    microop_class_name = 'MatrixArithMicroInst'
+
+    # 根据category前缀确定目标寄存器类型
+    # MOP表示矩阵指令，A表示ACC寄存器，T表示TR寄存器
+    if category.startswith("MOPA"):
+        dest_reg_id = "matRegClass[_machInst.md | 8]"
+    if category.startswith("MOPT"):
+        dest_reg_id = "matRegClass[_machInst.md]"
+    elif category.startswith("ROP"):
+        dest_reg_id = "intRegClass[_machInst.rd]"
+    elif category.startswith("FOP"):
+        dest_reg_id = "floatRegClass[_machInst.rd]"
+
+    src1_reg_id, src2_reg_id, src3_reg_id = "", "", ""
+    # 根据category设置源寄存器类型，
+    # AATT对应矩阵乘法指令，AAA对应逐元素指令
+    # 矩阵乘法在手册上的格式是ATT，但是A同时作为源寄存器与目标寄存器
+    # 所以这里设置为AATT
+    if category == "MOPAATT":  # acc <- acc + tr * tr
+        src1_reg_id = "matRegClass[_machInst.md | 8]"
+        src2_reg_id = "matRegClass[_machInst.ms1]"
+        src3_reg_id = "matRegClass[_machInst.ms2]"
+        num_src_regs = 3
+    elif category == "MOPAAA":  # acc <- acc, acc
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        src2_reg_id = "matRegClass[_machInst.ms2 | 8]"
+        num_src_regs = 2
+    elif category == "MOPAA":
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        num_src_regs = 1
+    # 下方将MOP的M作为目标寄存器，没有区分A与T，后续要进行修改
+    elif category == "MOPMR":  # mat <- mat, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "ROPMR":  # int <- mat, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPRR":  # mat <- int, int
+        src1_reg_id = "intRegClass[_machInst.rs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "FOPMR":  # float <- mat, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPFR":  # mat <- float, int
+        src1_reg_id = "floatRegClass[_machInst.fs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+
+    set_dest_reg_idx = setDestWrapper(dest_reg_id)
+    set_src_reg_idx = ""
+    if src1_reg_id:
+        set_src_reg_idx += setSrcWrapper(src1_reg_id)
+    if src2_reg_id:
+        set_src_reg_idx += setSrcWrapper(src2_reg_id)
+    if src3_reg_id:
+    # 处理矩阵乘加的情况，由于md同时作为源寄存器和目标寄存器，索引在0
+        set_src_reg_idx += setSrcWrapper(src3_reg_id)
+        old_md_idx = 0
+    else:
+    # 如果没有src3_reg_id，说明不是矩阵乘加
+    # 如果需要跟踪目标寄存器寄存器的旧值，需要将md加到源寄存器数组末尾
+        set_src_reg_idx += setSrcWrapper(dest_reg_id)
+        old_md_idx = num_src_regs
+
+    iop = InstObjParams(
+        name,
+        Name,
+        macroop_class_name,
+        {'code': code,
+         'type_name': type_name,
+         'set_dest_reg_idx': set_dest_reg_idx,
+         'set_src_reg_idx': set_src_reg_idx,
+         'declare_marith_template':
+          declareMArithTemplate(Name, type_name, widen),
+         'decode_marith_template':
+          decodeMArithTemplate(Name, type_name, widen)},
+        flags
+    )
+
+    code = mloopWrapper(code)
+    msu, mdu = get_mu_type(type_name)
+    mtype_mask = get_mtype_mask(type_name)
+
+    microiop = InstObjParams(name + "_micro",
+        Name + "Micro",
+        microop_class_name,
+        {'code': code,
+         'msu': msu,
+         'mdu': mdu,
+         'mtype_mask': mtype_mask,
+         'set_dest_reg_idx': set_dest_reg_idx,
+         'set_src_reg_idx': set_src_reg_idx,
+         'set_mlenb': setMlenb(),
+         'set_mrlenb': setMrlenb(),
+         'copy_old_md': copyOldMd(old_md_idx),
+         'declare_marith_template': declareMArithTemplate(Name + "Micro",
+                                                          type_name, widen)},
+        flags)
+
+    header_output = \
+        MatrixArithMicroDeclare.subst(microiop) + \
+        MatrixArithMacroDeclare.subst(iop)
+    decoder_output = \
+        MatrixArithMicroConstructor.subst(microiop) + \
+        MatrixArithMacroConstructor.subst(iop)
+    exec_output = MatrixArithMicroExecute.subst(microiop)
+    decode_block = MatrixArithDecodeBlock.subst(iop)
+}};
+
+def format MatrixFloatWideningCvtFormat(code, *flags) {{
+
+    macroop_class_name = 'MatrixArithCvtMacroInst'
+    microop_class_name = 'MatrixArithCvtMicroInst'
+    marith_macro_declare = declareMArithCvtTemplate(Name, 'float', 8, 64)
+    dest_reg_id = "matRegClass[_machInst.md |8]"
+    src1_reg_id = "matRegClass[_machInst.ms1 |8]"
+    num_src_regs = 1
+    set_dest_reg_idx = setDestWrapper(dest_reg_id)
+    set_src_reg_idx = setSrcWrapper(src1_reg_id)
+    set_src_reg_idx += setSrcWrapper(dest_reg_id)
+
+    old_md_idx = 1
+    code = fflags_wrapper(code)
+    marith_micro_declare = declareMArithCvtTemplate(Name +
+                                                    "Micro",
+                                                    'float',
+                                                    8,
+                                                    64)
+    iop = InstObjParams(
+        name,
+        Name,
+        macroop_class_name,
+        {
+            'set_dest_reg_idx': set_dest_reg_idx,
+            'set_src_reg_idx': set_src_reg_idx,
+            'code': code,
+            'declare_marith_template': marith_macro_declare
+        },
+        flags
+    )
+    microiop = InstObjParams(
+        name + "_micro",
+        Name + "Micro",
+        microop_class_name,
+        {
+            'code': code,
+            'set_dest_reg_idx': set_dest_reg_idx,
+            'set_src_reg_idx': set_src_reg_idx,
+            'set_mlenb': setMlenb(),
+            'set_mrlenb': setMrlenb(),
+            'copy_old_md': copyOldMd(old_md_idx),
+            'declare_marith_template': marith_micro_declare
+        },
+        flags
+    )
+    header_output = \
+        MatrixIntMicroDeclare.subst(microiop) + \
+        MatrixIntMacroDeclare.subst(iop)
+
+    decoder_output = \
+        MatrixIntMicroConstructor.subst(microiop) + \
+        MatrixFloatCvtMacroConstructor.subst(iop)
+
+    exec_output = MatrixFloatCvtMicroExecute.subst(microiop)
+
+    decode_block = MatrixFloatWideningAndNarrowingCvtDecodeBlock.subst(iop)
+}};
+
+
+def format MatrixArithCvtFormat(code,
+    src_type_name,
+    dst_type_name,
+    widen,
+    widen_den,
+     *flags) {{
+    # widen should be 1, 2, 4, default 1
+
+    W = float(widen) / float(widen_den)
+
+    macroop_class_name = 'MatrixArithCvtMacroInst'
+    microop_class_name = 'MatrixArithCvtMicroInst'
+
+    dest_reg_id = "matRegClass[_machInst.md | 8]"
+    src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+    num_src_regs = 1
+
+    set_dest_reg_idx = setDestWrapper(dest_reg_id)
+    set_src_reg_idx = setSrcWrapper(src1_reg_id)
+    set_src_reg_idx += setSrcWrapper(dest_reg_id)
+    old_md_idx = num_src_regs
+
+    iop = InstObjParams(
+        name,
+        Name,
+        macroop_class_name,
+        {'code': code,
+         'type_name': src_type_name,
+         'set_dest_reg_idx': set_dest_reg_idx,
+         'set_src_reg_idx': set_src_reg_idx,
+         'declare_marith_template':
+          declareMArithCvtTemplate(Name, src_type_name,dst_type_name, W),
+         'decode_marith_template':
+          decodeMArithCvtTemplate(Name, src_type_name,dst_type_name, W)},
+        flags
+    )
+
+    code = mloopWrapper(code)
+    msu, mdu = get_CvtMu_type(src_type_name, dst_type_name)
+    mtype_mask = get_mtype_mask(src_type_name)
+
+    microiop = InstObjParams(name + "_micro",
+        Name + "Micro",
+        microop_class_name,
+        {'code': code,
+         'msu': msu,
+         'mdu': mdu,
+         'mtype_mask': mtype_mask,
+         'set_dest_reg_idx': set_dest_reg_idx,
+         'set_src_reg_idx': set_src_reg_idx,
+         'set_mlenb': setMlenb(),
+         'set_mrlenb': setMrlenb(),
+         'copy_old_md': copyOldMd(old_md_idx),
+         'declare_marith_template': declareMArithCvtTemplate(Name +
+                                                            "Micro",
+                                            src_type_name,dst_type_name,W)},
+        flags)
+
+    header_output = \
+        MatrixArithMicroDeclare.subst(microiop) + \
+        MatrixArithMacroDeclare.subst(iop)
+    decoder_output = \
+        MatrixArithMicroConstructor.subst(microiop) + \
+        MatrixArithMacroConstructor.subst(iop)
+    exec_output = MatrixArithMicroExecute.subst(microiop)
+    decode_block = MatrixArithDecodeBlock.subst(iop)
+}};

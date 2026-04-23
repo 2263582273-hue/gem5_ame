@@ -1,0 +1,11 @@
+Import('*')
+
+# if env['CONF']['BUILD_ISA']:
+SimObject('MMU.py', sim_objects=[
+        'MemUnitWriteTiming', 'MemUnitReadTiming', 'AMEMemUnit'])
+
+Source('ame_mem_unit.cc')
+Source('read_timing_unit.cc')
+Source('write_timing_unit.cc')
+
+DebugFlag('AMEMMU')

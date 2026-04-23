@@ -1,0 +1,7 @@
+Import('*')
+
+SimObject('AMEInterface.py', sim_objects=['AMEInterface','InstQueue'])
+Source('ame_interface.cc')
+Source('inst_queue.cc')
+
+DebugFlag('AMExzc')

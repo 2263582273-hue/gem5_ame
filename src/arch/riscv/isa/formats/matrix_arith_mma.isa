@@ -1,0 +1,159 @@
+let {{
+    def mmaloopWrapper(code):
+        upper_bound_first = "mtilem"
+        upper_bound_second = "mtilen"
+        return '''
+            for (uint32_t j = 0; j < %s; j++) {
+                for (uint32_t i = 0; i < %s; i++) {
+                    %s
+                }
+            }
+        ''' % (upper_bound_first, upper_bound_second, code)
+
+    def declareMArithMmaTemplate(
+        class_name, type_name, widen, min_size=8, max_size=64):
+        sizes = [8, 16, 32, 64]
+        # float_types = {16: '_Float16', 32: 'float', 64: 'double'}
+        if type_name == 'float':
+            min_size = 16
+        code = ''
+        for size in sizes:
+            dest_size = size * widen
+            if size < min_size or size > max_size:
+                continue
+            if dest_size < min_size or dest_size > max_size:
+                continue
+            code += f'template class {class_name}'
+            # if type_name == 'float':
+            #    code += f'<{float_types[size]}, '
+            #    code += f'{float_types[dest_size]}>;\n'
+            # else:
+            code += f'<{type_name}{size}_t, {type_name}{dest_size}_t>;\n'
+        return code
+
+    def decodeMArithMmaTemplate(
+        class_name, type_name, widen, min_size=8, max_size=64):
+        sizes = [8, 16, 32, 64]
+        # float_types = {16: '_Float16', 32: 'float', 64: 'double'}
+        if type_name == 'float':
+            min_size = 16
+        code = 'switch(getMelen(machInst.eew, mtype.msew)) {\n'
+        for size in sizes:
+            dest_size = size * widen
+            if size < min_size or size > max_size:
+                continue
+            if dest_size < min_size or dest_size > max_size:
+                continue
+            code += f'case {size}: return new class {class_name}'
+            code += f'<{type_name}{size}_t, {type_name}{dest_size}_t>'
+            code += """(
+            machInst, mlen,
+            mrlen, mtilem,
+            mtilek, mtilen,
+            mtype);\n"""
+        code += 'default: GEM5_UNREACHABLE;}\n'
+        return code
+
+}};
+
+
+
+def format MatrixArithMmaFormat(code, category, type_name, widen, *flags) {{
+    # widen should be 1, 2, 4, default 1
+    op_class_name = 'MatrixArithMmaInst'
+    # microop_class_name = 'MatrixArithMmaMicroInst'
+
+    # 根据category前缀确定目标寄存器类型
+    # MOP表示矩阵指令，A表示ACC寄存器，T表示TR寄存器
+    if category.startswith("MOPA"):
+        dest_reg_id = "matRegClass[_machInst.md | 8]"
+    if category.startswith("MOPT"):
+        dest_reg_id = "matRegClass[_machInst.md]"
+    elif category.startswith("ROP"):
+        dest_reg_id = "intRegClass[_machInst.rd]"
+    elif category.startswith("FOP"):
+        dest_reg_id = "floatRegClass[_machInst.rd]"
+
+    src1_reg_id, src2_reg_id, src3_reg_id = "", "", ""
+    # 根据category设置源寄存器类型，
+    # AATT对应矩阵乘法指令，AAA对应逐元素指令
+    # 矩阵乘法在手册上的格式是ATT，但是A同时作为源寄存器与目标寄存器
+    # 所以这里设置为AATT
+    if category == "MOPAATT":  # acc <- acc + tr * tr
+        src1_reg_id = "matRegClass[_machInst.md | 8]"
+        src2_reg_id = "matRegClass[_machInst.ms1]"
+        src3_reg_id = "matRegClass[_machInst.ms2]"
+        num_src_regs = 3
+    elif category == "MOPAAA":  # acc <- acc, acc
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        src2_reg_id = "matRegClass[_machInst.ms2 | 8]"
+        num_src_regs = 2
+    elif category == "MOPAA":
+        src1_reg_id = "matRegClass[_machInst.ms1 | 8]"
+        num_src_regs = 1
+    # 下方将MOP的M作为目标寄存器，没有区分A与T，后续要进行修改
+    elif category == "MOPMR":  # mat <- mat, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "ROPMR":  # int <- mat, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPRR":  # mat <- int, int
+        src1_reg_id = "intRegClass[_machInst.rs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "FOPMR":  # float <- mat, int
+        src1_reg_id = "matRegClass[_machInst.ms1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+    elif category == "MOPFR":  # mat <- float, int
+        src1_reg_id = "floatRegClass[_machInst.fs1]"
+        src2_reg_id = "intRegClass[_machInst.rs2]"
+        num_src_regs = 2
+
+    set_dest_reg_idx = setDestWrapper(dest_reg_id)
+    set_src_reg_idx = ""
+    if src1_reg_id:
+        set_src_reg_idx += setSrcWrapper(src1_reg_id)
+    if src2_reg_id:
+        set_src_reg_idx += setSrcWrapper(src2_reg_id)
+    if src3_reg_id:
+    # 处理矩阵乘加的情况，由于md同时作为源寄存器和目标寄存器，索引在0
+        set_src_reg_idx += setSrcWrapper(src3_reg_id)
+        old_md_idx = 0
+    else:
+    # 如果没有src3_reg_id，说明不是矩阵乘加
+    # 如果需要跟踪目标寄存器寄存器的旧值，需要将md加到源寄存器数组末尾
+        set_src_reg_idx += setSrcWrapper(dest_reg_id)
+        old_md_idx = num_src_regs
+
+    code = mmaloopWrapper(code)
+    msu, mdu = get_mu_type(type_name)
+    mtype_mask = get_mtype_mask(type_name)
+    iop = InstObjParams(
+        name,
+        Name,
+        op_class_name,
+        {'code': code,
+         'msu': msu,
+         'mdu': mdu,
+         'mtype_mask': mtype_mask,
+         'type_name': type_name,
+         'set_dest_reg_idx': set_dest_reg_idx,
+         'set_src_reg_idx': set_src_reg_idx,
+         'set_mlenb': setMlenb(),
+         'set_mrlenb': setMrlenb(),
+         'copy_old_md': copyOldMd(old_md_idx),
+         'declare_marith_template':
+          declareMArithMmaTemplate(Name, type_name, widen),
+         'decode_marith_template':
+          decodeMArithMmaTemplate(Name, type_name, widen)},
+        flags
+    )
+    header_output = MatrixArithMmaDeclare.subst(iop)
+    decoder_output = MatrixArithMmaConstructor.subst(iop)
+    exec_output = MatrixArithMmaExecute.subst(iop)
+    decode_block = MatrixArithMmaDecodeBlock.subst(iop)
+}};
