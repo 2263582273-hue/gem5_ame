@@ -106,7 +106,6 @@ public:
     */
     bool requestGrant(minor::MinorDynInstPtr &inst);
     
-
     void sendInst(minor::MinorDynInstPtr &inst, ExecContextPtr &xc, std::function<void()> dependencie_callback);
     bool isbussy();
     void issue(InstQueue::QueueEntry &inst);

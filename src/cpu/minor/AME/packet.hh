@@ -13,6 +13,7 @@ typedef AMEPacket * AMEPacketPtr;
 class AMEPacket : public gem5::Packet
 {
   public:
+
     AMEPacket(gem5::RequestPtr req,gem5::MemCmd cmd,uint64_t req_id,uint8_t channel) :
         Packet(req, cmd), reqId(req_id), channel(channel) {}
     AMEPacket(gem5::RequestPtr req, gem5::MemCmd cmd, uint64_t req_id) :
