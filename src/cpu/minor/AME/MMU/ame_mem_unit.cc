@@ -43,6 +43,12 @@ AMEMemUnit::finishCurrentMemInst()
     currentMemInst = nullptr;
 }
 
+InstQueue::QueueEntry *
+AMEMemUnit::getCurrentMemInst() const
+{
+    return currentMemInst;
+}
+
 void
 AMEMemUnit::issue(AMEInterface& vector_wrapper, InstQueue::QueueEntry &inst)
 {

@@ -2,6 +2,8 @@
 #include "base/logging.hh"
 #include "base/cprintf.hh"
 #include "base/trace.hh"
+#include "arch/riscv/insts/matrix.hh"
+#include "arch/riscv/regs/matrix.hh"
 #include "cpu/minor/AME/ame_interface.hh"
 #include "cpu/minor/AME/defines.hh"
 #include "debug/AMEMMU.hh"
@@ -26,6 +28,41 @@ formatBytes(const uint8_t *data, uint64_t size)
     for (uint64_t i = 0; i < size; ++i) {
         ccprintf(os, "%02x", data[i]);
     }
+    return os.str();
+}
+
+template <typename ElemT>
+void
+writeLoadedRowToMatReg(RiscvISA::MatRegContainer *dest_reg,
+    const std::deque<uint8_t *> &data_q, uint32_t row_idx, uint64_t dst_size)
+{
+    auto md = (*dest_reg).as<ElemT>();
+    uint64_t col_idx = 0;
+    for (const auto *queued_data : data_q) {
+        ElemT value = 0;
+        memcpy(&value, queued_data, dst_size);
+        md[row_idx][col_idx] = value;
+        ++col_idx;
+    }
+}
+
+template <typename ElemT>
+std::string
+formatMatRegRow(RiscvISA::MatRegContainer *dest_reg, uint32_t row_idx,
+    uint64_t num_elems)
+{
+    auto md = (*dest_reg).as<ElemT>();
+    std::ostringstream os;
+    os << "[";
+    for (uint64_t col_idx = 0; col_idx < num_elems; ++col_idx) {
+        if (col_idx != 0) {
+            os << ' ';
+        }
+        os << "0x";
+        ccprintf(os, "%0*llx", static_cast<int>(sizeof(ElemT) * 2),
+            static_cast<unsigned long long>(md[row_idx][col_idx]));
+    }
+    os << "]";
     return os.str();
 }
 
@@ -181,16 +218,63 @@ void MemUnitReadTiming::on_item_load(uint8_t* data,bool _done){
     
     // dataQ.push_back(ndata);
     queueData(data);
-    //如果_done，说明这是最后一个读取的元素了，因此把剩下没读取的元素指令，林
+    //如果_done，说明这是最后一个读取的元素了，该指令的任务完成了
     if (_done) {
-        DPRINTF(AMEMMU, "read finish, dataQ size=%lu\n", dataQ.size());
-        uint64_t index = 0;
-        for (const auto *queued_data : dataQ) {
-            DPRINTF(AMEMMU, "dataQ[%lu]: %s\n",
-                index, formatBytes(queued_data, DST_SIZE));
-            ++index;
+        auto *current_mem_inst = amewrapper->amemmu->getCurrentMemInst();
+        panic_if(!current_mem_inst,
+            "MemUnitReadTiming finished without a current memory instruction");
+        auto *matrix_inst =
+            dynamic_cast<gem5::RiscvISA::MatrixMicroInst *>(
+                current_mem_inst->inst->staticInst.get());
+        panic_if(!matrix_inst,
+            "MemUnitReadTiming got non-matrix instruction on completion");
+
+        auto *dest_reg = static_cast<RiscvISA::MatRegContainer *>(
+            current_mem_inst->xc->getWritableRegOperand(
+                current_mem_inst->inst->staticInst.get(), 0));
+        panic_if(!dest_reg,
+            "MemUnitReadTiming failed to get writable matrix register");
+
+        const uint32_t row_idx = matrix_inst->microIdx;
+        switch (DST_SIZE) {
+            case 1:
+                writeLoadedRowToMatReg<uint8_t>(
+                    dest_reg, dataQ, row_idx, DST_SIZE);
+                DPRINTF(AMEMMU, "matReg row[%u] after load: %s\n", row_idx,
+                    formatMatRegRow<uint8_t>(dest_reg, row_idx, dataQ.size()));
+                break;
+            case 2:
+                writeLoadedRowToMatReg<uint16_t>(
+                    dest_reg, dataQ, row_idx, DST_SIZE);
+                DPRINTF(AMEMMU, "matReg row[%u] after load: %s\n", row_idx,
+                    formatMatRegRow<uint16_t>(dest_reg, row_idx, dataQ.size()));
+                break;
+            case 4:
+                writeLoadedRowToMatReg<uint32_t>(
+                    dest_reg, dataQ, row_idx, DST_SIZE);
+                DPRINTF(AMEMMU, "matReg row[%u] after load: %s\n", row_idx,
+                    formatMatRegRow<uint32_t>(dest_reg, row_idx, dataQ.size()));
+                break;
+            case 8:
+                writeLoadedRowToMatReg<uint64_t>(
+                    dest_reg, dataQ, row_idx, DST_SIZE);
+                DPRINTF(AMEMMU, "matReg row[%u] after load: %s\n", row_idx,
+                    formatMatRegRow<uint64_t>(dest_reg, row_idx, dataQ.size()));
+                break;
+            default:
+                panic("Unsupported DST_SIZE in MemUnitReadTiming: %u",
+                    DST_SIZE);
         }
+
+        // DPRINTF(AMEMMU, "read finish, dataQ size=%lu\n", dataQ.size());
+        // uint64_t index = 0;
+        // for (const auto *queued_data : dataQ) {
+        //     DPRINTF(AMEMMU, "dataQ[%lu]: %s\n",
+        //         index, formatBytes(queued_data, DST_SIZE));
+        //     ++index;
+        // }
         //说明MemUnitReadTiming的任务彻底结束了，把占用清除，把队列清空即可
+        // amewrapper->amemmu.curr
         amewrapper->amemmu->finishCurrentMemInst();
         occupied=false;
         clearDataQ();

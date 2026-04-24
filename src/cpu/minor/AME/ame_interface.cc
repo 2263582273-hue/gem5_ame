@@ -15,6 +15,43 @@
 namespace gem5 {
     // namespace minor {
 
+        namespace
+        {
+
+        bool
+        isAMEIssueSupported(const minor::MinorDynInstPtr &inst)
+        {
+            return inst && inst->isInst() &&
+                (inst->staticInst->opClass() == enums::SystolicMMA ||
+                 inst->staticInst->isMemRef());
+        }
+
+        uint8_t
+        buildRdValid(const minor::MinorDynInstPtr &inst)
+        {
+            if (!inst || !inst->isInst()) {
+                return 0;
+            }
+
+            const uint8_t num_src_regs = inst->staticInst->numSrcRegs();
+            uint8_t rd_valid = 0;
+            if (num_src_regs >= 1) {
+                rd_valid |= 0x1;
+            }
+            if (num_src_regs >= 2) {
+                rd_valid |= 0x2;
+            }
+            return rd_valid;
+        }
+
+        bool
+        buildWbValid(const minor::MinorDynInstPtr &inst)
+        {
+            return inst && inst->isInst() && inst->staticInst->numDestRegs();
+        }
+
+        } // anonymous namespace
+
         AMEInterface::AMEInterface(const AMEInterfaceParams &params):
         SimObject(params),
         systolicArrayCore(params.systolicArrayCore),
@@ -35,7 +72,7 @@ namespace gem5 {
         void AMEInterface::sendInst(minor::MinorDynInstPtr &inst, ExecContextPtr &xc, std::function<void()> dependencie_callback) {
             if ((inst_queue->Instruction_Queue.size()==0)&&(inst_queue->Memory_Queue.size()==0)) {
                     inst_queue->startTicking(*this);
-                    DPRINTF(AMEMMU,"just a test0\n");
+                    // DPRINTF(AMEMMU,"just a test0\n");
                 }
 
             if (inst->staticInst->opClass()==enums::SystolicMMA) {
@@ -68,10 +105,40 @@ namespace gem5 {
             return (inst_queue->Instruction_Queue.size() +
                 inst_queue->Memory_Queue.size()) < instQueueSize_;
         }
+
+        AMEInterface::AICBIssueResp
+        AMEInterface::issue_aicb(bool valid, uint64_t hartId,
+            minor::MinorDynInstPtr &inst, uint64_t instId, ExecContextPtr &xc,
+            std::function<void()> dependencie_callback)
+        {
+            AICBIssueResp resp;
+            const bool supported = isAMEIssueSupported(inst);
+
+            resp.rdValid = buildRdValid(inst);
+            resp.wbValid = buildWbValid(inst);
+            resp.ready = supported && requestGrant(inst);
+            resp.accept = valid && resp.ready;
+
+            DPRINTF(AMExzc,
+                "issue_aicb: valid=%d hartId=%llu instId=%llu ready=%d "
+                "accept=%d rdValid=%u wbValid=%d inst=%s\n",
+                valid, static_cast<unsigned long long>(hartId),
+                static_cast<unsigned long long>(instId), resp.ready,
+                resp.accept, static_cast<unsigned>(resp.rdValid),
+                resp.wbValid,
+                (inst && inst->isInst()) ? inst->staticInst->getName() :
+                "<null>");
+
+            if (resp.accept) {
+                sendInst(inst, xc, dependencie_callback);
+            }
+
+            return resp;
+        }
         void AMEInterface::issue(InstQueue::QueueEntry &inst) {
             //issue的核心目的其实就是把Instruction_Queue里的指令发送给systolicArrayCore
             inst.issued=true;
-            DPRINTF(AMEMMU,"just a test3\n");
+            // DPRINTF(AMEMMU,"just a test3\n");
             if (inst.inst->isMemRef()) {
                 DPRINTF(AMEMMU,"Sending instruction %s to VMU\n",inst.inst->staticInst->getName());
                 amemmu->issue(*this, inst);

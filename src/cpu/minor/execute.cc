@@ -1257,13 +1257,20 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
              *  doesn't match? */
             discard_inst = inst->id.streamSeqNum !=
                 ex_info.streamSeqNum || discard;
-            if (discard_inst) {
-                DPRINTF(MinorExecute, "Discarding vec inst: %s as its stream"
-                    " state was unexpected, expected: %d\n",
-                    *inst, ex_info.streamSeqNum);
-            }
+
             if (!discard_inst) { //这里要把mma指令送入AME中
-                if (!cpu.ameInterface->requestGrant(inst)) {
+                ExecContextPtr xc=std::make_shared<ExecContext>(
+                    cpu, *cpu.threads[thread_id], *this, inst);
+                auto issue_resp = cpu.ameInterface->issue_aicb(
+                    true, inst->id.threadId, inst, inst->id.execSeqNum, xc,
+                    [this,inst]() mutable {
+                        completed_mma_inst = true;
+                        DPRINTF(AMExzc, "The instruction has been "
+                            "hosted by the AME %s \n", *inst);
+                        // cpu.wakeupOnEvent(Pipeline::ExecuteStageId);
+                    });
+
+                if (!issue_resp.accept) {
                     DPRINTF(AMExzc, "The AME could not accept"
                     "the instruction:%s\n",*inst);
                     completed_inst = false;
@@ -1271,24 +1278,15 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                     completed_inst=false;
                     completed_mma_inst=false;
                     waiting_ame_engine=true;
-                    // DPRINTF(AMExzc, "hellohello\n");
-                    ExecContextPtr xc=std::make_shared<ExecContext>(cpu, *cpu.threads[thread_id], *this, inst);
                     doInstCommitAccounting(inst); //这个本来是在commitInst()函数里，这里提前调用了
-                    cpu.ameInterface->sendInst(inst,xc,[this,inst]() mutable {
-                        completed_mma_inst = true;
-                        DPRINTF(AMExzc, "The instruction has been "
-                            "hosted by the AME %s \n", *inst);
-                        // cpu.wakeupOnEvent(Pipeline::ExecuteStageId);
-                    });
-                    
-
-
-                    
                 }
 
             } else {
                 /* Discard instruction */
                 completed_inst = true;
+                DPRINTF(MinorExecute, "Discarding vec inst: %s as its stream"
+                    " state was unexpected, expected: %d\n",
+                    *inst, ex_info.streamSeqNum);
             }
 
         }else if (can_commit_insts) {

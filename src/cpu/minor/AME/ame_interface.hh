@@ -91,6 +91,14 @@ public:
     AMEInterface(const AMEInterfaceParams &param); //这里的param是在AMEInterface.py里赋值的
     ~AMEInterface()= default; //报错2，= default
 
+    struct AICBIssueResp
+    {
+        bool ready = false;
+        bool accept = false;
+        uint8_t rdValid = 0;
+        bool wbValid = false;
+    };
+
     
     /**
     * requestGrant function is used by the scalar to ask for permision to send
@@ -104,6 +112,10 @@ public:
     void issue(InstQueue::QueueEntry &inst);
     const unsigned int instQueueSize_;
 
+    //AICB封装
+    AICBIssueResp issue_aicb(bool valid, uint64_t hartId,
+        minor::MinorDynInstPtr &inst, uint64_t instId, ExecContextPtr &xc,
+        std::function<void()> dependencie_callback);
     //访存函数
     void recvTimingResp(AMEPacketPtr pkt);
 

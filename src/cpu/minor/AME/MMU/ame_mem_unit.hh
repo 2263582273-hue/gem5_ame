@@ -21,6 +21,7 @@ class AMEMemUnit : public SimObject
     bool isOccupied();
     void issue(AMEInterface& vector_wrapper,InstQueue::QueueEntry &inst);
     void finishCurrentMemInst();
+    InstQueue::QueueEntry *getCurrentMemInst() const;
 
   private:
     
