@@ -2,7 +2,7 @@
 #include "base/trace.hh"
 #include "cpu/minor/AME/inst_queue.hh"
 #include "cpu/minor/AME/req_state.hh"
-#include "debug/AMExzc.hh"
+#include "debug/AMEInterface.hh"
 #include "debug/AMEMMU.hh"
 #include "cpu/minor/exec_context.hh"
 #include "debug/MMU.hh"
@@ -13,153 +13,162 @@
 #include "cpu/minor/AME/packet.hh"
 
 namespace gem5 {
-    // namespace minor {
+// namespace minor {
 
-        namespace
-        {
+namespace
+{
 
-        bool
-        isAMEIssueSupported(const minor::MinorDynInstPtr &inst)
-        {
-            return inst && inst->isInst() &&
-                (inst->staticInst->opClass() == enums::SystolicMMA ||
-                 inst->staticInst->isMemRef());
+bool
+isAMEIssueSupported(const minor::MinorDynInstPtr &inst)
+{
+    return inst && inst->isInst() &&
+        (inst->staticInst->opClass() == enums::SystolicMMA ||
+         inst->staticInst->isMemRef());
+}
+
+uint8_t
+buildRdValid(const minor::MinorDynInstPtr &inst)
+{
+    if (!inst || !inst->isInst()) {
+        return 0;
+    }
+
+    const uint8_t num_src_regs = inst->staticInst->numSrcRegs();
+    uint8_t rd_valid = 0;
+    if (num_src_regs >= 1) {
+        rd_valid |= 0x1;
+    }
+    if (num_src_regs >= 2) {
+        rd_valid |= 0x2;
+    }
+    return rd_valid;
+}
+
+bool
+buildWbValid(const minor::MinorDynInstPtr &inst)
+{
+    return inst && inst->isInst() && inst->staticInst->numDestRegs();
+}
+
+} // aicb namespace
+
+AMEInterface::AMEInterface(const AMEInterfaceParams &params)
+    : SimObject(params),
+      systolicArrayCore(params.systolicArrayCore),
+      inst_queue(params.inst_queue),
+      instQueueSize_(params.instQueueSize_),
+      //访存初始化
+      amemem_port(name() + ".mem_port", this, 1),
+      uniqueReqId(0),
+      amemmu(params.ame_mmu),
+      AMECacheMasterId(
+          params.system->getRequestorId(this, name() + ".AME_cache"))
+{
+    for (uint8_t i = 0; i < 1; ++i) {
+        AMERegMasterIds.push_back(params.system->getRequestorId(
+            this, name() + ".AME_reg" + std::to_string(i)));
+        AMERegPorts.push_back(AMERegPort(name() + ".AME_reg_port", this, i));
+    }
+}
+
+void
+AMEInterface::sendInst(minor::MinorDynInstPtr &inst, ExecContextPtr &xc,
+    std::function<void()> dependencie_callback)
+{
+    if ((inst_queue->Instruction_Queue.size() == 0) &&
+        (inst_queue->Memory_Queue.size() == 0)) {
+        inst_queue->startTicking(*this);
+        // DPRINTF(AMEMMU,"just a test0\n");
+    }
+
+    if (inst->staticInst->opClass() == enums::SystolicMMA) {
+        DPRINTF(AMEInterface, "Sending a new command to the AME~ %s\n", inst);
+
+        // dependencie_callback(); //虽然mma指令还没有完成，但是提前执行回调函数，因为读写的都是矩阵寄存器，普通的指令无需阻塞
+
+        //然后将该指令插入队列，下个周期就能开始执行了
+        inst_queue->Instruction_Queue.push_back(
+            new InstQueue::QueueEntry(inst, xc, dependencie_callback));
+    } else if (inst->staticInst->isMemRef()) {
+        DPRINTF(AMEInterface, "Sending a new command to the AME~ %s\n", inst);
+        inst_queue->Memory_Queue.push_back(
+            new InstQueue::QueueEntry(inst, xc, dependencie_callback));
+        auto currInst_ = dynamic_cast<gem5::RiscvISA::MleMicroInst*>(
+            inst->staticInst.get());
+        if (currInst_) {
+            DPRINTF(AMEInterface,
+                "MleMicroInst params: eew=%u, mtilek=%u, tr=%u, widen=%u\n",
+                currInst_->eew, currInst_->mtilek, currInst_->tr,
+                currInst_->widen);
         }
+    } else {
+        panic("Invalid Matrix Instruction, insn=%s\n", inst);
+    }
+}
 
-        uint8_t
-        buildRdValid(const minor::MinorDynInstPtr &inst)
-        {
-            if (!inst || !inst->isInst()) {
-                return 0;
-            }
+bool
+AMEInterface::requestGrant(minor::MinorDynInstPtr &inst)
+{
+    return (inst_queue->Instruction_Queue.size() +
+        inst_queue->Memory_Queue.size()) < instQueueSize_;
+}
 
-            const uint8_t num_src_regs = inst->staticInst->numSrcRegs();
-            uint8_t rd_valid = 0;
-            if (num_src_regs >= 1) {
-                rd_valid |= 0x1;
-            }
-            if (num_src_regs >= 2) {
-                rd_valid |= 0x2;
-            }
-            return rd_valid;
-        }
+AMEInterface::AICBIssueResp
+AMEInterface::issue_aicb(bool valid, uint64_t hartId,
+    minor::MinorDynInstPtr &inst, uint64_t instId, ExecContextPtr &xc,
+    std::function<void()> dependencie_callback)
+{
+    AICBIssueResp resp;
+    const bool supported = isAMEIssueSupported(inst);
 
-        bool
-        buildWbValid(const minor::MinorDynInstPtr &inst)
-        {
-            return inst && inst->isInst() && inst->staticInst->numDestRegs();
-        }
+    resp.rdValid = buildRdValid(inst);
+    resp.wbValid = buildWbValid(inst);
+    resp.ready = supported && requestGrant(inst);
+    resp.accept = valid && resp.ready;
 
-        } // anonymous namespace
+    DPRINTF(AMEInterface,
+        "issue_aicb: valid=%d hartId=%llu instId=%llu ready=%d "
+        "accept=%d rdValid=%u wbValid=%d inst=%s\n",
+        valid, static_cast<unsigned long long>(hartId),
+        static_cast<unsigned long long>(instId), resp.ready,
+        resp.accept, static_cast<unsigned>(resp.rdValid), resp.wbValid,
+        (inst && inst->isInst()) ? inst->staticInst->getName() : "<null>");
 
-        AMEInterface::AMEInterface(const AMEInterfaceParams &params):
-        SimObject(params),
-        systolicArrayCore(params.systolicArrayCore),
-        inst_queue(params.inst_queue),
-        instQueueSize_(params.instQueueSize_),
-        //访存初始化
-        amemem_port(name()+".mem_port", this, 1),
-        uniqueReqId(0),
-        amemmu(params.ame_mmu),
-        AMECacheMasterId(params.system->getRequestorId(this,name()+".AME_cache")) {
-            for (uint8_t i=0; i<1; ++i){
-                AMERegMasterIds.push_back(params.system->getRequestorId(this,name()+".AME_reg"
-            +std::to_string(i)));
-            AMERegPorts.push_back(AMERegPort(name()+".AME_reg_port", this, i));
-            }
-        }
+    if (resp.accept) {
+        sendInst(inst, xc, dependencie_callback);
+    }
 
-        void AMEInterface::sendInst(minor::MinorDynInstPtr &inst, ExecContextPtr &xc, std::function<void()> dependencie_callback) {
-            if ((inst_queue->Instruction_Queue.size()==0)&&(inst_queue->Memory_Queue.size()==0)) {
-                    inst_queue->startTicking(*this);
-                    // DPRINTF(AMEMMU,"just a test0\n");
-                }
+    return resp;
+}
 
-            if (inst->staticInst->opClass()==enums::SystolicMMA) {
-                DPRINTF(AMExzc,"Sending a new command to the AME~ %s\n",inst);
+void
+AMEInterface::issue(InstQueue::QueueEntry &inst)
+{
+    //issue的核心目的其实就是把Instruction_Queue里的指令发送给systolicArrayCore
+    inst.issued = true;
+    // DPRINTF(AMEMMU,"just a test3\n");
+    if (inst.inst->isMemRef()) {
+        DPRINTF(AMEMMU, "Sending instruction %s to VMU\n",
+            inst.inst->staticInst->getName());
+        amemmu->issue(*this, inst);
+    } else if (
+        (inst.inst->staticInst->opClass() == enums::SystolicMMA) ||
+        (inst.inst->staticInst->opClass() == enums::SystolicMMA)) {
+        systolicArrayCore->acceptInstruction(inst.inst, inst.xc);
+    } else {
+        panic("Invalid Vector Instruction\n");
+    }
+}
 
-                // dependencie_callback(); //虽然mma指令还没有完成，但是提前执行回调函数，因为读写的都是矩阵寄存器，普通的指令无需阻塞
-
-                //然后将该指令插入队列，下个周期就能开始执行了
-                inst_queue->Instruction_Queue.push_back(
-                    new InstQueue::QueueEntry(
-                        inst,xc,dependencie_callback));
-                
-            } else if (inst->staticInst->isMemRef()){
-                DPRINTF(AMExzc,"Sending a new command to the AME~ %s\n",inst);
-                inst_queue->Memory_Queue.push_back(new InstQueue::QueueEntry(inst,xc,dependencie_callback));
-                auto currInst_ = dynamic_cast<gem5::RiscvISA::MleMicroInst*>(inst->staticInst.get());
-                if (currInst_) {
-                    DPRINTF(AMExzc,
-                        "MleMicroInst params: eew=%u, mtilek=%u, tr=%u, widen=%u\n",
-                        currInst_->eew, currInst_->mtilek, currInst_->tr,
-                        currInst_->widen);
-                }
-            }else {
-                panic("Invalid Matrix Instruction, insn=%s\n", inst);
-            }
-
-        }
-
-        bool AMEInterface::requestGrant(minor::MinorDynInstPtr &inst) {
-            return (inst_queue->Instruction_Queue.size() +
-                inst_queue->Memory_Queue.size()) < instQueueSize_;
-        }
-
-        AMEInterface::AICBIssueResp
-        AMEInterface::issue_aicb(bool valid, uint64_t hartId,
-            minor::MinorDynInstPtr &inst, uint64_t instId, ExecContextPtr &xc,
-            std::function<void()> dependencie_callback)
-        {
-            AICBIssueResp resp;
-            const bool supported = isAMEIssueSupported(inst);
-
-            resp.rdValid = buildRdValid(inst);
-            resp.wbValid = buildWbValid(inst);
-            resp.ready = supported && requestGrant(inst);
-            resp.accept = valid && resp.ready;
-
-            DPRINTF(AMExzc,
-                "issue_aicb: valid=%d hartId=%llu instId=%llu ready=%d "
-                "accept=%d rdValid=%u wbValid=%d inst=%s\n",
-                valid, static_cast<unsigned long long>(hartId),
-                static_cast<unsigned long long>(instId), resp.ready,
-                resp.accept, static_cast<unsigned>(resp.rdValid),
-                resp.wbValid,
-                (inst && inst->isInst()) ? inst->staticInst->getName() :
-                "<null>");
-
-            if (resp.accept) {
-                sendInst(inst, xc, dependencie_callback);
-            }
-
-            return resp;
-        }
-        void AMEInterface::issue(InstQueue::QueueEntry &inst) {
-            //issue的核心目的其实就是把Instruction_Queue里的指令发送给systolicArrayCore
-            inst.issued=true;
-            // DPRINTF(AMEMMU,"just a test3\n");
-            if (inst.inst->isMemRef()) {
-                DPRINTF(AMEMMU,"Sending instruction %s to VMU\n",inst.inst->staticInst->getName());
-                amemmu->issue(*this, inst);
-            }
-            else if ((inst.inst->staticInst->opClass()==enums::SystolicMMA)||
-        (inst.inst->staticInst->opClass()==enums::SystolicMMA)) {
-                systolicArrayCore->acceptInstruction(inst.inst,inst.xc);
-            } else {
-            panic("Invalid Vector Instruction\n");
-            }
-            
-            
-        }
-
-        bool AMEInterface::isbussy() {
-            return !systolicArrayCore->isIdle() ||
-                inst_queue->occupied ||
-                !inst_queue->Instruction_Queue.empty() ||
-                !inst_queue->Memory_Queue.empty() ||
-                amemmu->isOccupied();
-        }
+bool
+AMEInterface::isbussy()
+{
+    return !systolicArrayCore->isIdle() ||
+        inst_queue->occupied ||
+        !inst_queue->Instruction_Queue.empty() ||
+        !inst_queue->Memory_Queue.empty() ||
+        amemmu->isOccupied();
+}
 
 Port &
 AMEInterface::getPort(const std::string &if_name, PortID idx)

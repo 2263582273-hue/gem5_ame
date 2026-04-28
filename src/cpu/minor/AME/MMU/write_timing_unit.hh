@@ -6,6 +6,7 @@
 #include <queue>
 
 #include "base/statistics.hh"
+#include "base/types.hh"
 // #include "cpu/minor/AME/ame_interface.hh"
 
 #include "cpu/exec_context.hh"
@@ -27,29 +28,34 @@ public:
     void regStats() override;
 
     void queueData(uint8_t *data);
-    void queueAddrs(uint8_t *data);
-    void initialize(AMEInterface& vector_wrapper, uint64_t count,
-        uint64_t DST_SIZE,uint64_t mem_addr,uint8_t mop,uint64_t stride,
-        Location data_to,ExecContextPtr& xc,
-        std::function<void(bool)> on_item_store);
+    void initialize(AMEInterface* &_ame_wrapper, Addr _ea, RegVal _size,
+        uint8_t _DST_SIZE, RegId _regid, Location _data_to,
+        ExecContextPtr& _xc);
+    bool writeFunction();
+    void on_item_store(bool done);
+    void clearDataQ();
 
 private:
     //set by params
     const uint8_t channel;
     const uint64_t cacheLineSize;
-    const uint64_t VRF_LineSize;
+    const uint64_t regLineSize;
 
     volatile bool done;
     std::deque<uint8_t *> dataQ;
-    //Used by indexed Operations to hold the element index
-    std::deque<uint8_t *> AddrsQ;
-    std::function<bool(void)> writeFunction;
 
     //modified by writeFunction closure over time
-    uint64_t vecIndex;
+    uint64_t writeIndex;
+    uint64_t numcount;
     AMEInterface* amewrapper;
 
 public:
+    Addr ea;
+    RegVal size;
+    uint8_t DST_SIZE;
+    RegId regid;
+    Location data_to;
+    ExecContextPtr xc;
     // Stat for number of cache lines write requested
     bool occupied;
     statistics::Scalar Cache_line_w_req;

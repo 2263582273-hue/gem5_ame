@@ -1,7 +1,7 @@
 #include "cpu/minor/AME/inst_queue.hh"
 #include "base/trace.hh"
 #include "debug/AMEMMU.hh"
-#include "debug/AMExzc.hh"
+#include "debug/AMEInterface.hh"
 
 #include <algorithm>
 #include <cassert>
@@ -34,7 +34,7 @@ namespace gem5 {
 
     if ((Instruction_Queue.size()==0)&&(!occupied)&&(Memory_Queue.size()==0)) {
             stopTicking();
-            DPRINTF(AMExzc,"AME is stopped since no instruction\n");
+            DPRINTF(AMEInterface,"AME is stopped since no instruction\n");
             return;
         }
 
@@ -47,7 +47,7 @@ namespace gem5 {
         }
 
         ameInterface->systolicArrayCore->advance();
-        // DPRINTF(AMExzc,"systolicArrayCore is advanced\n");
+        // DPRINTF(AMEInterface,"systolicArrayCore is advanced\n");
         if (ameInterface->systolicArrayCore->isOutputValid()) {
 
             ameInterface->systolicArrayCore->writeBackOutput();

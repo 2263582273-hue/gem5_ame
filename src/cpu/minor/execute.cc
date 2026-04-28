@@ -47,7 +47,7 @@
 #include "cpu/minor/func_unit_systolic.hh"
 #include "cpu/minor/lsq.hh"
 #include "cpu/op_class.hh"
-#include "debug/AMExzc.hh"
+#include "debug/AMEInterface.hh"
 #include "debug/Activity.hh"
 #include "debug/Branch.hh"
 #include "debug/Drain.hh"
@@ -618,11 +618,11 @@ Execute::issue(ThreadID thread_id)
             //正常的指令现在会被分发给各个function unit，但矩阵指令会在这里被拦截
             if (!scoreboard[thread_id].canInstIssue(inst, NULL, NULL,
                 cpu.curCycle(), cpu.getContext(thread_id))) {
-                    DPRINTF(AMExzc, "MMA instruction %s can't be issued because of register\n",*inst);
+                    DPRINTF(AMEInterface, "MMA instruction %s can't be issued because of register\n",*inst);
                     issued = false;
                 }
             else { //因为matrix指令完成周期不确定，所以mark_unpredictable设置成true，寄存器只有在clearInstDests()后才能再issue
-                // DPRINTF(AMExzc, "MMA instruction %s issue to exec1234 "
+                // DPRINTF(AMEInterface, "MMA instruction %s issue to exec1234 "
                 //     "inst is Memref: %d, inst isStore: %d\n",*inst,inst->staticInst->isMemRef(),inst->staticInst->isStore());
                 scoreboard[thread_id].markupInstDests(inst, cpu.curCycle() +
                     Cycles(0), cpu.getContext(thread_id), true);
@@ -1265,13 +1265,13 @@ Execute::commit(ThreadID thread_id, bool only_commit_microops, bool discard,
                     true, inst->id.threadId, inst, inst->id.execSeqNum, xc,
                     [this,inst]() mutable {
                         completed_mma_inst = true;
-                        DPRINTF(AMExzc, "The instruction has been "
+                        DPRINTF(AMEInterface, "The instruction has been "
                             "hosted by the AME %s \n", *inst);
                         // cpu.wakeupOnEvent(Pipeline::ExecuteStageId);
                     });
 
                 if (!issue_resp.accept) {
-                    DPRINTF(AMExzc, "The AME could not accept"
+                    DPRINTF(AMEInterface, "The AME could not accept"
                     "the instruction:%s\n",*inst);
                     completed_inst = false;
                 } else {
