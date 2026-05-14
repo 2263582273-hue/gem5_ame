@@ -149,6 +149,27 @@ parser.add_argument(
     help="要扫描的 trace 文件路径（默认 ~/gem5/m5out/trace.out）",
 )
 
+#SPM新增
+parser.add_argument(
+    "--use-spm",
+    action="store_true",
+    help="Enable scratchpad memory for AME memory accesses",
+)
+
+parser.add_argument(
+    "--spm-base",
+    type=lambda x: int(x, 0),
+    default=0x90000000,
+    help="SPM base physical address",
+)
+
+parser.add_argument(
+    "--spm-size",
+    type=str,
+    default="512KiB",
+    help="SPM size",
+)
+
 if "--ruby" in sys.argv:
     Ruby.define_options(parser)
 
@@ -200,10 +221,25 @@ if args.smt and args.num_cpus > 1:
 
 np = args.num_cpus
 mp0_path = multiprocesses[0].executable
+
+#SPM新增
+# system = System(
+#     cpu=[CPUClass(cpu_id=i) for i in range(np)],
+#     mem_mode=test_mem_mode,
+#     mem_ranges=[AddrRange(args.mem_size)],
+#     cache_line_size=args.cacheline_size,
+# )
+dram_range = AddrRange(args.mem_size)
+spm_range = AddrRange(start=args.spm_base, size=args.spm_size)
+
+mem_ranges = [dram_range]
+if args.use_spm:
+    mem_ranges.append(spm_range)
+
 system = System(
     cpu=[CPUClass(cpu_id=i) for i in range(np)],
     mem_mode=test_mem_mode,
-    mem_ranges=[AddrRange(args.mem_size)],
+    mem_ranges=mem_ranges,
     cache_line_size=args.cacheline_size,
 )
 
@@ -297,17 +333,50 @@ if args.ruby:
         # Connect the cpu's cache ports to Ruby
         ruby_port.connectCpuPorts(system.cpu[i])
 else:
+    #SPM新增
+    # MemClass = Simulation.setMemClass(args)
+    # system.membus = SystemXBar()
+    # system.system_port = system.membus.cpu_side_ports
+    # CacheConfig.config_cache(args, system)
+    # for cpu in system.cpu:
+    #     if args.l2cache:
+    #         cpu.ameInterface.mem_port = system.tol2bus.cpu_side_ports
+    #     else:
+    #         cpu.ameInterface.mem_port = system.membus.cpu_side_ports
+    # MemConfig.config_mem(args, system)
+    # config_filesystem(system, args)
     MemClass = Simulation.setMemClass(args)
     system.membus = SystemXBar()
-    system.system_port = system.membus.cpu_side_ports
+
+    if args.use_spm:
+        system.spm = ScratchpadMemory(range=spm_range)
+        system.spm.latency = "10ns"
+        system.spm.bandwidth = "64GiB/s"
+
+        system.ame_spm_xbar = SpmXBar()
+        system.system_port = system.ame_spm_xbar.cpu_side_ports
+    else:
+        system.system_port = system.membus.cpu_side_ports
+
     CacheConfig.config_cache(args, system)
     for cpu in system.cpu:
-        if args.l2cache:
+        if args.use_spm:
+            cpu.ameInterface.mem_port = system.ame_spm_xbar.cpu_side_ports
+        elif args.l2cache:
             cpu.ameInterface.mem_port = system.tol2bus.cpu_side_ports
         else:
             cpu.ameInterface.mem_port = system.membus.cpu_side_ports
+
+    if args.use_spm:
+        system.ame_spm_xbar.mem_side_ports = system.spm.port
+        if args.l2cache:
+            system.ame_spm_xbar.mem_side_ports = system.tol2bus.cpu_side_ports
+        else:
+            system.ame_spm_xbar.mem_side_ports = system.membus.cpu_side_ports
     MemConfig.config_mem(args, system)
     config_filesystem(system, args)
+    
+
 
 system.workload = SEWorkload.init_compatible(mp0_path)
 

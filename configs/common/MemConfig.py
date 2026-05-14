@@ -39,6 +39,11 @@ from common import (
 )
 
 import m5.objects
+#SPM新增
+def is_spm_range(system, r):
+    return hasattr(system, "spm") and \
+        int(r.start) == int(system.spm.range.start) and \
+        int(r.end) == int(system.spm.range.end)
 
 
 def create_mem_intf(intf, r, i, intlv_bits, intlv_size, xor_low_bit):
@@ -211,6 +216,8 @@ def config_mem(options, system):
     for r in system.mem_ranges:
         # As the loops iterates across ranges, assign them alternatively
         # to DRAM and NVM if both configured, starting with DRAM
+        if is_spm_range(system, r):
+            continue
         range_iter += 1
 
         for i in range(nbr_mem_ctrls):

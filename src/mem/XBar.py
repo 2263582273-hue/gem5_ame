@@ -222,3 +222,16 @@ class IOXBar(NoncoherentXBar):
     frontend_latency = 2
     forward_latency = 1
     response_latency = 2
+
+class SpmXBar(NoncoherentXBar):
+    type = 'SpmXBar'
+    abstract = False
+    cxx_header = "mem/spmbar.hh"   
+    cxx_class = "gem5::SpmXBar" 
+    width = 32
+
+    # A handful pipeline stages for each portion of the latency
+    # contributions.
+    frontend_latency = 0
+    forward_latency = 0
+    response_latency = 0

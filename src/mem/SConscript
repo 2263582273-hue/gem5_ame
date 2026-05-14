@@ -62,12 +62,13 @@ SimObject('CfiMemory.py', sim_objects=['CfiMemory'])
 SimObject('SharedMemoryServer.py', sim_objects=['SharedMemoryServer'])
 SimObject('SimpleMemory.py', sim_objects=['SimpleMemory'])
 SimObject('XBar.py', sim_objects=[
-    'BaseXBar', 'NoncoherentXBar', 'CoherentXBar', 'SnoopFilter'])
+    'BaseXBar', 'NoncoherentXBar', 'CoherentXBar', 'SnoopFilter','SpmXBar'])
 SimObject('HMCController.py', sim_objects=['HMCController'])
 SimObject('SerialLink.py', sim_objects=['SerialLink'])
 SimObject('MemDelay.py', sim_objects=['MemDelay', 'SimpleMemDelay'])
 SimObject('PortTerminator.py', sim_objects=['PortTerminator'])
 SimObject('ThreadBridge.py', sim_objects=['ThreadBridge'])
+SimObject('ScratchpadMemory.py', sim_objects=['ScratchpadMemory'])
 
 Source('abstract_mem.cc')
 Source('addr_mapper.cc')
@@ -105,6 +106,8 @@ Source('htm.cc')
 Source('serial_link.cc')
 Source('mem_delay.cc')
 Source('port_terminator.cc')
+Source('spm_mem.cc')
+Source('spmbar.cc')
 
 GTest('backdoor_manager.test', 'backdoor_manager.test.cc',
       'backdoor_manager.cc', with_tag('gem5_trace'))
